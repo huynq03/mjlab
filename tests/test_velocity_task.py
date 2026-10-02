@@ -1,11 +1,21 @@
 """Tests specific to velocity tasks."""
 
+import io
+import warnings
+from contextlib import redirect_stderr, redirect_stdout
+
 import pytest
 
-from mjlab.asset_zoo.robots import G1_ACTION_SCALE, GO1_ACTION_SCALE
+from mjlab.asset_zoo.robots import (
+  G1_ACTION_SCALE,
+  GO1_ACTION_SCALE,
+  MINIPI_ACTION_SCALE,
+)
+from mjlab.envs import ManagerBasedRlEnv
 from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.sensor import ContactSensorCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg
-from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
+from mjlab.tasks.velocity.mdp import UniformVelocityCommand, UniformVelocityCommandCfg
 
 
 @pytest.fixture(scope="module")
@@ -24,6 +34,12 @@ def g1_velocity_task_ids(velocity_task_ids: list[str]) -> list[str]:
 def go1_velocity_task_ids(velocity_task_ids: list[str]) -> list[str]:
   """Get all Go1 velocity task IDs."""
   return [t for t in velocity_task_ids if "Go1" in t]
+
+
+@pytest.fixture(scope="module")
+def minipi_velocity_task_ids(velocity_task_ids: list[str]) -> list[str]:
+  """Get all Mini-Pi velocity task IDs."""
+  return [t for t in velocity_task_ids if "MiniPi" in t]
 
 
 @pytest.fixture(scope="module")
@@ -88,6 +104,21 @@ def test_go1_velocity_has_required_sensors(go1_velocity_task_ids: list[str]) -> 
         assert name in sensor_names, f"Task {task_id} missing {name} sensor"
 
 
+def test_minipi_velocity_has_required_sensors(
+  minipi_velocity_task_ids: list[str],
+) -> None:
+  """Mini-Pi velocity tasks should have feet/ground and self collision sensors."""
+  assert len(minipi_velocity_task_ids) == 2
+  for task_id in minipi_velocity_task_ids:
+    cfg = load_env_cfg(task_id)
+
+    assert cfg.scene.sensors is not None, f"Task {task_id} has no sensors"
+
+    sensor_names = {s.name for s in cfg.scene.sensors}
+    for name in ("feet_ground_contact", "self_collision", "foot_height_scan"):
+      assert name in sensor_names, f"Task {task_id} missing {name} sensor"
+
+
 def test_flat_velocity_tasks_have_plane_terrain(
   flat_velocity_task_ids: list[str],
 ) -> None:
@@ -126,6 +157,7 @@ def test_rough_velocity_training_has_curriculum_enabled() -> None:
   rough_training_tasks = [
     "Mjlab-Velocity-Rough-Unitree-G1",
     "Mjlab-Velocity-Rough-Unitree-Go1",
+    "Mjlab-Velocity-Rough-MiniPi",
   ]
 
   for task_id in rough_training_tasks:
@@ -146,6 +178,7 @@ def test_rough_velocity_play_has_curriculum_disabled() -> None:
   rough_training_tasks = [
     "Mjlab-Velocity-Rough-Unitree-G1",
     "Mjlab-Velocity-Rough-Unitree-Go1",
+    "Mjlab-Velocity-Rough-MiniPi",
   ]
 
   for task_id in rough_training_tasks:
@@ -197,3 +230,79 @@ def test_go1_velocity_has_correct_action_scale(
     assert joint_pos_action.scale == GO1_ACTION_SCALE, (
       f"Task {task_id} action scale mismatch, expected GO1_ACTION_SCALE"
     )
+
+
+def test_minipi_velocity_has_correct_action_scale_and_timing(
+  minipi_velocity_task_ids: list[str],
+) -> None:
+  """Mini-Pi velocity tasks should use MINIPI_ACTION_SCALE at a 50 Hz policy rate."""
+  for task_id in minipi_velocity_task_ids:
+    cfg = load_env_cfg(task_id)
+
+    joint_pos_action = cfg.actions["joint_pos"]
+    assert isinstance(joint_pos_action, JointPositionActionCfg), (
+      f"Task {task_id} joint_pos action is not JointPositionActionCfg"
+    )
+    assert joint_pos_action.scale == MINIPI_ACTION_SCALE, (
+      f"Task {task_id} action scale mismatch, expected MINIPI_ACTION_SCALE"
+    )
+
+    # The stance chatters at the generic 5 ms timestep; see minipi env_cfgs.
+    assert cfg.sim.mujoco.timestep == pytest.approx(0.002)
+    assert cfg.decimation == 10
+
+
+def test_minipi_velocity_command_ranges(minipi_velocity_task_ids: list[str]) -> None:
+  """Mini-Pi commands should stay within the vendor limits, with no ramp-up."""
+  for task_id in minipi_velocity_task_ids:
+    cfg = load_env_cfg(task_id)
+
+    twist_cmd = cfg.commands["twist"]
+    assert isinstance(twist_cmd, UniformVelocityCommandCfg)
+    assert twist_cmd.ranges.lin_vel_x == (-0.25, 0.25)
+    assert twist_cmd.ranges.lin_vel_y == (-0.2, 0.2)
+    assert twist_cmd.ranges.ang_vel_z == (-0.5, 0.5)
+    assert twist_cmd.rel_standing_envs == pytest.approx(0.1)
+    # Forward-only envs force vx >= 0.3 m/s, above the Mini-Pi limit.
+    assert twist_cmd.rel_forward_envs == 0.0
+    assert "command_vel" not in cfg.curriculum
+
+
+def test_minipi_velocity_self_collision_matches_g1_per_control_step(
+  minipi_velocity_task_ids: list[str],
+) -> None:
+  """A full-step self-collision should cost Mini-Pi the same as G1 (4 x -1.0)."""
+  for task_id in minipi_velocity_task_ids:
+    cfg = load_env_cfg(task_id)
+
+    sensor = next(s for s in cfg.scene.sensors or () if s.name == "self_collision")
+    assert isinstance(sensor, ContactSensorCfg)
+    assert sensor.history_length == cfg.decimation == 10
+    weight = cfg.rewards["self_collisions"].weight
+    assert weight == pytest.approx(-0.4)
+    assert weight * sensor.history_length == pytest.approx(-4.0)
+
+
+def test_minipi_flat_commands_are_bounded_and_standing_is_zero() -> None:
+  """Sampled commands should respect the limits; standing envs get exactly zero."""
+  cfg = load_env_cfg("Mjlab-Velocity-Flat-MiniPi")
+  cfg.scene.num_envs = 256
+  cfg.seed = 0
+
+  with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+      env = ManagerBasedRlEnv(cfg, device="cpu")
+      env.reset()
+
+  term = env.command_manager.get_term("twist")
+  assert isinstance(term, UniformVelocityCommand)
+  command = term.command
+  standing = term.is_standing_env
+
+  assert standing.any() and not standing.all()
+  assert (command[standing] == 0.0).all()
+  assert (command[:, 0].abs() <= 0.25).all()
+  assert (command[:, 1].abs() <= 0.2).all()
+  assert (command[:, 2].abs() <= 0.5).all()
+  env.close()
