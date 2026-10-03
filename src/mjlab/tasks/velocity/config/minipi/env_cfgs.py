@@ -23,18 +23,18 @@ from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
-# Swing-foot clearance target. Baseline assumption, needs tuning from gait results: the
-# vendor files contain no training config, so this is about 13% of the 0.31 m leg
-# length (G1's 0.1 m scaled by leg length gives 0.048 m).
-_FOOT_CLEARANCE = 0.04
+# Desired swing-foot clearance/peak height, shared by foot_clearance and
+# foot_swing_height. A reward target, not a hard limit. Raised from the 0.04 m
+# baseline (about 13% of the 0.31 m leg length) for higher steps.
+_FOOT_CLEARANCE = 0.05
 
 # Commands with norm at or below this are zeroed (stand); every remaining command
 # drives the locomotion terms. Shared by the sampler and all stand/walk switches.
 _COMMAND_THRESHOLD = 0.1
 
-# Gait clock period, shared by the phase observation and the foot_gait reward.
-# 0.4 s suits Mini-Pi's short legs (Unitree G1 uses 0.6 s).
-_GAIT_PERIOD = 0.4
+# Gait clock period, shared by the phase observation and the foot_gait reward. The
+# legs are half a period apart, so at vx = 0.4 m/s a step covers 0.4 * 0.25 = 0.1 m.
+_GAIT_PERIOD = 0.5
 
 
 def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -120,13 +120,14 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   assert isinstance(twist_cmd, UniformVelocityCommandCfg)
   twist_cmd.viz.z_offset = 0.3
 
-  # Linear limits are HighTorque's Mini-Pi RL deployment limits (sim2real
-  # walk/dreamwaq.yaml, the config the PD gains come from). The vendor clamps yaw at
-  # 2.0 rad/s; the first baseline keeps the generic 0.5.
-  twist_cmd.ranges.lin_vel_x = (-0.25, 0.25)
+  # Lateral limit is HighTorque's Mini-Pi RL deployment limit (sim2real
+  # walk/dreamwaq.yaml, the config the PD gains come from). Forward is widened past
+  # the vendor's +-0.25 m/s for longer steps. The vendor clamps yaw at 2.0 rad/s; we
+  # keep the generic 0.5.
+  twist_cmd.ranges.lin_vel_x = (-0.3, 0.4)
   twist_cmd.ranges.lin_vel_y = (-0.2, 0.2)
   twist_cmd.ranges.ang_vel_z = (-0.5, 0.5)
-  # Forward-only envs force vx >= 0.3 m/s, which is above the Mini-Pi limit.
+  # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
   twist_cmd.rel_forward_envs = 0.0
   twist_cmd.command_deadzone = _COMMAND_THRESHOLD
   # Fixed command range: the generic curriculum ramps vx up to 3 m/s.
@@ -163,10 +164,10 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # yaw, calf_joint is the knee). Not tuned for Mini-Pi.
   cfg.rewards["pose"].params["std_standing"] = {".*": 0.05}
   cfg.rewards["pose"].params["std_walking"] = {
-    r".*_hip_pitch_joint": 0.5,
+    r".*_hip_pitch_joint": 0.6,
     r".*_hip_roll_joint": 0.15,
     r".*_thigh_joint": 0.15,
-    r".*_calf_joint": 0.5,
+    r".*_calf_joint": 0.55,
     r".*_ankle_pitch_joint": 0.25,
     r".*_ankle_roll_joint": 0.1,
   }
@@ -179,8 +180,8 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     r".*_ankle_roll_joint": 0.15,
   }
 
-  # Scales the generic tracking width (std 0.5 for 1 m/s commands) to the Mini-Pi
-  # command range (0.25 m/s).
+  # Scales the generic tracking width (std 0.5 for 1 m/s commands) to the original
+  # 0.25 m/s Mini-Pi command range. Not retuned for the 0.4 m/s range.
   cfg.rewards["track_linear_velocity"].params["std"] = 0.125
 
   # Tracking at 1.0 (generic 2.0) so it does not dominate gait formation. Roll and
@@ -224,9 +225,9 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.rewards["air_time"].weight = 0.0
 
   # Lighter clearance shaping and smoothness, stronger slip penalty, so stepping
-  # beats shuffling. foot_swing_height stays configured but contributes nothing.
+  # beats shuffling. foot_swing_height lightly pulls the landing peak toward 5 cm.
   cfg.rewards["foot_clearance"].weight = -1.0
-  cfg.rewards["foot_swing_height"].weight = 0.0
+  cfg.rewards["foot_swing_height"].weight = -0.15
   cfg.rewards["foot_slip"].weight = -0.25
   cfg.rewards["action_rate_l2"].weight = -0.05
 

@@ -254,17 +254,17 @@ def test_minipi_velocity_has_correct_action_scale_and_timing(
 
 
 def test_minipi_velocity_command_ranges(minipi_velocity_task_ids: list[str]) -> None:
-  """Mini-Pi commands should stay within the vendor limits, with no ramp-up."""
+  """Mini-Pi commands should stay within the fixed Mini-Pi range, with no ramp-up."""
   for task_id in minipi_velocity_task_ids:
     cfg = load_env_cfg(task_id)
 
     twist_cmd = cfg.commands["twist"]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
-    assert twist_cmd.ranges.lin_vel_x == (-0.25, 0.25)
+    assert twist_cmd.ranges.lin_vel_x == (-0.3, 0.4)
     assert twist_cmd.ranges.lin_vel_y == (-0.2, 0.2)
     assert twist_cmd.ranges.ang_vel_z == (-0.5, 0.5)
     assert twist_cmd.rel_standing_envs == pytest.approx(0.1)
-    # Forward-only envs force vx >= 0.3 m/s, above the Mini-Pi limit.
+    # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
     assert twist_cmd.rel_forward_envs == 0.0
     assert "command_vel" not in cfg.curriculum
     assert twist_cmd.command_deadzone == pytest.approx(0.1)
@@ -283,7 +283,7 @@ def test_minipi_velocity_locomotion_finetune_config(
       "track_angular_velocity": 1.0,
       "foot_gait": 0.5,
       "foot_clearance": -1.0,
-      "foot_swing_height": 0.0,
+      "foot_swing_height": -0.15,
       "foot_slip": -0.25,
       "action_rate_l2": -0.05,
       "stand_still": -1.0,
@@ -297,9 +297,11 @@ def test_minipi_velocity_locomotion_finetune_config(
     for name, weight in expected_weights.items():
       assert rewards[name].weight == pytest.approx(weight), name
     assert rewards["track_angular_velocity"].params["xy_weight"] == 0.05
+    for name in ["foot_clearance", "foot_swing_height"]:
+      assert rewards[name].params["target_height"] == pytest.approx(0.05), name
 
     gait = rewards["foot_gait"].params
-    assert gait["period"] == pytest.approx(0.4)
+    assert gait["period"] == pytest.approx(0.5)
     assert gait["offset"] == [0.0, 0.5]
     assert gait["threshold"] == pytest.approx(0.55)
     assert gait["sensor_name"] == "feet_ground_contact"
@@ -319,10 +321,10 @@ def test_minipi_velocity_locomotion_finetune_config(
     pose = rewards["pose"].params
     assert pose["std_standing"] == {".*": 0.05}
     assert pose["std_walking"] == {
-      r".*_hip_pitch_joint": 0.5,
+      r".*_hip_pitch_joint": 0.6,
       r".*_hip_roll_joint": 0.15,
       r".*_thigh_joint": 0.15,
-      r".*_calf_joint": 0.5,
+      r".*_calf_joint": 0.55,
       r".*_ankle_pitch_joint": 0.25,
       r".*_ankle_roll_joint": 0.1,
     }
@@ -382,7 +384,7 @@ def test_minipi_flat_commands_are_bounded_and_standing_is_zero() -> None:
 
   assert standing.any() and not standing.all()
   assert (command[standing] == 0.0).all()
-  assert (command[:, 0].abs() <= 0.25).all()
+  assert ((command[:, 0] >= -0.3) & (command[:, 0] <= 0.4)).all()
   assert (command[:, 1].abs() <= 0.2).all()
   assert (command[:, 2].abs() <= 0.5).all()
   # Deadzone: every command is either exactly zero or clearly above 0.1.
