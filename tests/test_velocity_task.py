@@ -5,6 +5,7 @@ import warnings
 from contextlib import redirect_stderr, redirect_stdout
 
 import pytest
+import torch
 
 from mjlab.asset_zoo.robots import (
   G1_ACTION_SCALE,
@@ -266,6 +267,85 @@ def test_minipi_velocity_command_ranges(minipi_velocity_task_ids: list[str]) -> 
     # Forward-only envs force vx >= 0.3 m/s, above the Mini-Pi limit.
     assert twist_cmd.rel_forward_envs == 0.0
     assert "command_vel" not in cfg.curriculum
+    assert twist_cmd.command_deadzone == pytest.approx(0.1)
+
+
+def test_minipi_velocity_locomotion_finetune_config(
+  minipi_velocity_task_ids: list[str],
+) -> None:
+  """Mini-Pi reward weights, pose tolerances, gait clock and reset events."""
+  for task_id in minipi_velocity_task_ids:
+    cfg = load_env_cfg(task_id)
+    rewards = cfg.rewards
+
+    expected_weights = {
+      "track_linear_velocity": 1.0,
+      "track_angular_velocity": 1.0,
+      "foot_gait": 0.5,
+      "foot_clearance": -1.0,
+      "foot_swing_height": 0.0,
+      "foot_slip": -0.25,
+      "action_rate_l2": -0.05,
+      "stand_still": -1.0,
+      "is_terminated": -200.0,
+      "joint_acc_l2": -2.5e-7,
+      "dof_pos_limits": -1.0,
+      "soft_landing": -1e-5,
+      "upright": 1.0,
+      "angular_momentum": -0.02,
+    }
+    for name, weight in expected_weights.items():
+      assert rewards[name].weight == pytest.approx(weight), name
+    assert rewards["track_angular_velocity"].params["xy_weight"] == 0.05
+
+    gait = rewards["foot_gait"].params
+    assert gait["period"] == pytest.approx(0.4)
+    assert gait["offset"] == [0.0, 0.5]
+    assert gait["threshold"] == pytest.approx(0.55)
+    assert gait["sensor_name"] == "feet_ground_contact"
+
+    # Every stand/walk switch matches the command deadzone.
+    assert rewards["pose"].params["walking_threshold"] == pytest.approx(0.1)
+    for name in [
+      "foot_gait",
+      "stand_still",
+      "foot_clearance",
+      "foot_swing_height",
+      "foot_slip",
+      "soft_landing",
+    ]:
+      assert rewards[name].params["command_threshold"] == pytest.approx(0.1), name
+
+    pose = rewards["pose"].params
+    assert pose["std_standing"] == {".*": 0.05}
+    assert pose["std_walking"] == {
+      r".*_hip_pitch_joint": 0.5,
+      r".*_hip_roll_joint": 0.15,
+      r".*_thigh_joint": 0.15,
+      r".*_calf_joint": 0.5,
+      r".*_ankle_pitch_joint": 0.25,
+      r".*_ankle_roll_joint": 0.1,
+    }
+
+    # One gait clock for the reward and the phase observation, in both groups.
+    for group in ("actor", "critic"):
+      names = list(cfg.observations[group].terms)
+      assert names.count("phase") == 1
+      assert names[names.index("command") + 1] == "phase"
+      phase_params = cfg.observations[group].terms["phase"].params
+      assert phase_params["period"] == gait["period"]
+      assert phase_params["command_threshold"] == pytest.approx(0.1)
+
+    # Foot order must match the right-then-left model order of the contact channels
+    # and site ids, or foot_clearance pairs one foot's height with the other's speed.
+    assert rewards["foot_clearance"].params["asset_cfg"].site_names == (
+      "r_foot",
+      "l_foot",
+    )
+    assert rewards["foot_slip"].params["asset_cfg"].site_names == ("r_foot", "l_foot")
+
+    assert "push_robot" not in cfg.events
+    assert cfg.events["reset_base"].params["pose_range"]["z"] == (0.0, 0.0)
 
 
 def test_minipi_velocity_self_collision_matches_g1_per_control_step(
@@ -305,4 +385,20 @@ def test_minipi_flat_commands_are_bounded_and_standing_is_zero() -> None:
   assert (command[:, 0].abs() <= 0.25).all()
   assert (command[:, 1].abs() <= 0.2).all()
   assert (command[:, 2].abs() <= 0.5).all()
+  # Deadzone: every command is either exactly zero or clearly above 0.1.
+  norm = command.norm(dim=1)
+  assert ((norm == 0.0) | (norm > 0.1)).all()
+
+  # Policy interface: 48D proprioception + command, plus the 2D gait phase -> 12D.
+  obs = env.observation_manager.compute()
+  actor_obs = obs["actor"]
+  assert isinstance(actor_obs, torch.Tensor)
+  assert actor_obs.shape == (256, 50)
+  # Phase is [sin, cos] while moving and exactly zero while standing.
+  phase_obs = actor_obs[:, 48:50]  # Right after the 3D command at 45:48.
+  assert (phase_obs[norm == 0.0] == 0.0).all()
+  moving_phase = phase_obs[norm > 0.0]
+  assert torch.allclose(moving_phase.norm(dim=1), torch.ones(len(moving_phase)))
+  assert env.action_manager.total_action_dim == 12
+  assert "foot_gait" in env.reward_manager.active_terms
   env.close()

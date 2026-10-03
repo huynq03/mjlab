@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock
 
+import pytest
 import torch
 
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import RayCastData, RayCastSensor
-from mjlab.tasks.velocity.mdp.rewards import upright
+from mjlab.tasks.velocity.mdp.rewards import feet_gait, stand_still, upright
 from mjlab.utils.lab_api.math import quat_from_euler_xyz
 
 
@@ -188,3 +190,68 @@ def test_batch_consistency():
   assert r[1].item() > 0.99
   assert r[2].item() < 0.7
   assert r[3].item() > 0.99
+
+
+def _gait_reward(step: int, contact: list[float], command: list[float]) -> float:
+  """Evaluate feet_gait for one env at a given control step."""
+  sensor = MagicMock()
+  sensor.data.current_contact_time = torch.tensor([contact])
+  env = SimpleNamespace(
+    scene={"feet": sensor},
+    episode_length_buf=torch.tensor([step]),
+    step_dt=0.02,
+    device="cpu",
+    command_manager=SimpleNamespace(get_command=lambda _: torch.tensor([command])),
+  )
+  reward = feet_gait(
+    env,  # type: ignore[arg-type]
+    sensor_name="feet",
+    period=0.4,
+    offset=[0.0, 0.5],
+    threshold=0.55,
+    command_name="twist",
+    command_threshold=0.1,
+  )
+  return reward.item()
+
+
+@pytest.mark.parametrize(
+  ("step", "contact", "expected"),
+  [
+    # t = 0.1 s: phases (0.25, 0.75), foot 0 in stance, foot 1 in swing.
+    (5, [0.1, 0.0], 1.0),
+    (5, [0.0, 0.1], 0.0),
+    (5, [0.1, 0.1], 0.5),
+    # t = 0.3 s: phases (0.75, 0.25), the feet swap half a period later.
+    (15, [0.0, 0.1], 1.0),
+    (15, [0.1, 0.0], 0.0),
+  ],
+)
+def test_feet_gait_alternates_half_period(step, contact, expected):
+  assert _gait_reward(step, contact, [0.2, 0.0, 0.0]) == expected
+
+
+@pytest.mark.parametrize("command", [[0.0, 0.0, 0.0], [0.06, 0.0, 0.04]])
+def test_feet_gait_is_zero_when_standing(command):
+  assert _gait_reward(5, [0.1, 0.0], command) == 0.0
+
+
+@pytest.mark.parametrize(
+  ("command", "expected"),
+  [([0.0, 0.0, 0.0], 0.05), ([0.2, 0.0, 0.0], 0.0)],
+)
+def test_stand_still_only_penalizes_at_zero_command(command, expected):
+  asset = MagicMock()
+  asset.data.joint_pos = torch.tensor([[0.1, -0.2, 0.0]])
+  asset.data.default_joint_pos = torch.zeros(1, 3)
+  env = SimpleNamespace(
+    scene={"robot": asset},
+    command_manager=SimpleNamespace(get_command=lambda _: torch.tensor([command])),
+  )
+  cost = stand_still(
+    env,  # type: ignore[arg-type]
+    command_name="twist",
+    command_threshold=0.1,
+    asset_cfg=SceneEntityCfg("robot", joint_ids=slice(None)),
+  )
+  assert cost.item() == pytest.approx(expected)

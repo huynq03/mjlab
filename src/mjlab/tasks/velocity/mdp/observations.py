@@ -45,3 +45,26 @@ def foot_contact_forces(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tenso
   assert sensor_data.force is not None
   forces_flat = sensor_data.force.flatten(start_dim=1)  # [B, N*3]
   return torch.sign(forces_flat) * torch.log1p(torch.abs(forces_flat))
+
+
+def phase(
+  env: ManagerBasedRlEnv,
+  period: float,
+  command_name: str,
+  command_threshold: float = 0.1,
+) -> torch.Tensor:
+  """Gait clock as ``[sin, cos]`` of the episode-time phase.
+
+  Zero while the command norm is at or below ``command_threshold``, so standing has
+  no free-running clock.
+
+  Returns:
+    Tensor of shape [B, 2].
+  """
+  global_phase = (env.episode_length_buf * env.step_dt) % period / period
+  angle = global_phase * 2.0 * torch.pi
+  clock = torch.stack([torch.sin(angle), torch.cos(angle)], dim=1)
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  stand_mask = torch.linalg.norm(command, dim=1) <= command_threshold
+  return torch.where(stand_mask.unsqueeze(1), torch.zeros_like(clock), clock)

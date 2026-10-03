@@ -80,6 +80,7 @@ class UniformVelocityCommand(CommandTerm):
     self.vel_command_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
     self.vel_command_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
     self.vel_command_b[env_ids, 2] = r.uniform_(*self.cfg.ranges.ang_vel_z)
+    self._apply_deadzone(env_ids)
     if self.cfg.heading_command:
       assert self.cfg.ranges.heading is not None
       self.heading_target[env_ids] = r.uniform_(*self.cfg.ranges.heading)
@@ -154,6 +155,17 @@ class UniformVelocityCommand(CommandTerm):
     standing_env_ids = self.is_standing_env.nonzero(as_tuple=False).flatten()
     self.vel_command_b[standing_env_ids, :] = 0.0
     self.vel_command_w[standing_env_ids, :] = 0.0
+    # Heading control rewrites the yaw rate every step, so filter again.
+    self._apply_deadzone()
+
+  def _apply_deadzone(self, env_ids: torch.Tensor | None = None) -> None:
+    """Zero commands whose norm is at or below ``command_deadzone``."""
+    if self.cfg.command_deadzone <= 0.0:
+      return
+    ids = slice(None) if env_ids is None else env_ids
+    cmd = self.vel_command_b[ids]
+    keep = torch.norm(cmd, dim=1, keepdim=True) > self.cfg.command_deadzone
+    self.vel_command_b[ids] = cmd * keep
 
   # GUI.
 
@@ -322,6 +334,9 @@ class UniformVelocityCommandCfg(CommandTermCfg):
   init_velocity_prob: float = 0.0
   """Probability that an env starts its episode already moving at its sampled
   planar command velocity. Applied on reset only."""
+  command_deadzone: float = 0.0
+  """Commands whose (vx, vy, wz) norm is at or below this value are set to exactly
+  zero, so every command is either a clear stand or a clear move. 0 disables it."""
 
   @dataclass
   class Ranges:

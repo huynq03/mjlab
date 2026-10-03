@@ -8,7 +8,9 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import (
   ContactMatch,
   ContactSensorCfg,
@@ -25,6 +27,14 @@ from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 # vendor files contain no training config, so this is about 13% of the 0.31 m leg
 # length (G1's 0.1 m scaled by leg length gives 0.048 m).
 _FOOT_CLEARANCE = 0.04
+
+# Commands with norm at or below this are zeroed (stand); every remaining command
+# drives the locomotion terms. Shared by the sampler and all stand/walk switches.
+_COMMAND_THRESHOLD = 0.1
+
+# Gait clock period, shared by the phase observation and the foot_gait reward.
+# 0.4 s suits Mini-Pi's short legs (Unitree G1 uses 0.6 s).
+_GAIT_PERIOD = 0.4
 
 
 def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -50,7 +60,10 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       assert isinstance(sensor.frame, ObjRef)
       sensor.frame.name = "base_link"
 
-  site_names = ("l_foot", "r_foot")
+  # Right first, matching the XML body/site order. Site ids and contact channels
+  # resolve in model order (right, left) while the foot height scan keeps this
+  # tuple's order, so any other order cross-pairs the feet in foot_clearance.
+  site_names = ("r_foot", "l_foot")
   geom_names = tuple(
     f"{side}_foot{i}_collision" for side in ("l", "r") for i in range(1, 6)
   )
@@ -115,8 +128,33 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   twist_cmd.ranges.ang_vel_z = (-0.5, 0.5)
   # Forward-only envs force vx >= 0.3 m/s, which is above the Mini-Pi limit.
   twist_cmd.rel_forward_envs = 0.0
+  twist_cmd.command_deadzone = _COMMAND_THRESHOLD
   # Fixed command range: the generic curriculum ramps vx up to 3 m/s.
   cfg.curriculum.pop("command_vel", None)
+
+  # First locomotion finetune: no pushes and no reset drop. Robustness training
+  # comes back later.
+  cfg.events.pop("push_robot", None)
+  cfg.events["reset_base"].params["pose_range"]["z"] = (0.0, 0.0)
+
+  # Gait clock right after the command, as in Unitree's velocity task. The critic
+  # copied the actor terms at build time, so it gets its own entry.
+  phase_obs = ObservationTermCfg(
+    func=mdp.phase,
+    params={
+      "period": _GAIT_PERIOD,
+      "command_name": "twist",
+      "command_threshold": _COMMAND_THRESHOLD,
+    },
+  )
+  for group in ("actor", "critic"):
+    terms = cfg.observations[group].terms
+    assert "phase" not in terms
+    items = list(terms.items())
+    idx = [name for name, _ in items].index("command") + 1
+    cfg.observations[group].terms = dict(
+      items[:idx] + [("phase", phase_obs)] + items[idx:]
+    )
 
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
   cfg.events["base_com"].params["asset_cfg"].body_names = ("base_link",)
@@ -125,10 +163,10 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # yaw, calf_joint is the knee). Not tuned for Mini-Pi.
   cfg.rewards["pose"].params["std_standing"] = {".*": 0.05}
   cfg.rewards["pose"].params["std_walking"] = {
-    r".*_hip_pitch_joint": 0.3,
+    r".*_hip_pitch_joint": 0.5,
     r".*_hip_roll_joint": 0.15,
     r".*_thigh_joint": 0.15,
-    r".*_calf_joint": 0.35,
+    r".*_calf_joint": 0.5,
     r".*_ankle_pitch_joint": 0.25,
     r".*_ankle_roll_joint": 0.1,
   }
@@ -145,6 +183,33 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # command range (0.25 m/s).
   cfg.rewards["track_linear_velocity"].params["std"] = 0.125
 
+  # Tracking at 1.0 (generic 2.0) so it does not dominate gait formation. Roll and
+  # pitch rates count 0.05x so natural walking sway is not punished like yaw error.
+  cfg.rewards["track_linear_velocity"].weight = 1.0
+  cfg.rewards["track_angular_velocity"].weight = 1.0
+  cfg.rewards["track_angular_velocity"].params["xy_weight"] = 0.05
+
+  # Stand/walk switches match the command deadzone.
+  cfg.rewards["pose"].params["walking_threshold"] = _COMMAND_THRESHOLD
+  for reward_name in ["foot_clearance", "foot_swing_height", "foot_slip"]:
+    cfg.rewards[reward_name].params["command_threshold"] = _COMMAND_THRESHOLD
+  cfg.rewards["soft_landing"].params["command_threshold"] = _COMMAND_THRESHOLD
+
+  # Alternating gait clock, left/right half a period apart, on the same clock as the
+  # phase observation.
+  cfg.rewards["foot_gait"] = RewardTermCfg(
+    func=mdp.feet_gait,
+    weight=0.5,
+    params={
+      "sensor_name": feet_ground_cfg.name,
+      "period": _GAIT_PERIOD,
+      "offset": [0.0, 0.5],
+      "threshold": 0.55,
+      "command_name": "twist",
+      "command_threshold": _COMMAND_THRESHOLD,
+    },
+  )
+
   cfg.rewards["upright"].params["asset_cfg"].body_names = ("base_link",)
   cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("base_link",)
 
@@ -157,6 +222,28 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.rewards["body_ang_vel"].weight = -0.05
   cfg.rewards["angular_momentum"].weight = -0.02
   cfg.rewards["air_time"].weight = 0.0
+
+  # Lighter clearance shaping and smoothness, stronger slip penalty, so stepping
+  # beats shuffling. foot_swing_height stays configured but contributes nothing.
+  cfg.rewards["foot_clearance"].weight = -1.0
+  cfg.rewards["foot_swing_height"].weight = 0.0
+  cfg.rewards["foot_slip"].weight = -0.25
+  cfg.rewards["action_rate_l2"].weight = -0.05
+
+  # Unitree-style terms: hold the default pose at zero command, a large penalty for
+  # falling (timeouts are truncations, not terminations), and a small joint
+  # acceleration regularizer. Joint limits stay at the generic -1.0.
+  cfg.rewards["stand_still"] = RewardTermCfg(
+    func=mdp.stand_still,
+    weight=-1.0,
+    params={
+      "command_name": "twist",
+      "command_threshold": _COMMAND_THRESHOLD,
+      "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
+    },
+  )
+  cfg.rewards["is_terminated"] = RewardTermCfg(func=mdp.is_terminated, weight=-200.0)
+  cfg.rewards["joint_acc_l2"] = RewardTermCfg(func=mdp.joint_acc_l2, weight=-2.5e-7)
 
   # The cost counts substeps in contact, up to the decimation. -0.4 over 10 substeps
   # matches G1's -1.0 over 4 for a collision lasting a full control step.
