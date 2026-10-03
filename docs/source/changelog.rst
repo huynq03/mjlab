@@ -8,6 +8,8 @@ Upcoming version (not yet released)
 Added
 ^^^^^
 
+- Added a Mini-Pi checkpoint ONNX export script with metadata and inference checks.
+
 - Added the HighTorque Mini-Pi 12-DOF biped to the asset zoo, with the
   ``Mjlab-Velocity-Flat-MiniPi`` and ``Mjlab-Velocity-Rough-MiniPi`` tasks.
 
