@@ -314,8 +314,9 @@ def feet_separation(
 ) -> torch.Tensor:
   """Penalize feet closer than ``min_separation`` laterally in the base frame.
 
-  The cost is ``((min_separation - separation) / min_separation)^2`` below the
-  minimum and zero above it; there is no upper bound.
+  With ``d = (min_separation - separation) / min_separation`` clamped at zero, the
+  cost is ``d + d^2``: a clear gradient just inside the minimum, growing faster
+  further in. Zero at or above the minimum; there is no upper bound.
   """
   separation = foot_lateral_separation(env, asset_cfg)
   too_close = ((min_separation - separation) / min_separation).clamp(min=0.0)
@@ -323,7 +324,7 @@ def feet_separation(
   log["Metrics/foot_separation_mean"] = separation.mean()
   log["Metrics/foot_separation_min"] = separation.min()
   log["Metrics/foot_too_close_fraction"] = (separation < min_separation).float().mean()
-  return torch.square(too_close)
+  return too_close + torch.square(too_close)
 
 
 def feet_clearance(

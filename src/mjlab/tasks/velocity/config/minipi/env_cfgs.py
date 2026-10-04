@@ -123,8 +123,8 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # Widened past HighTorque's Mini-Pi RL deployment limits (sim2real
   # walk/dreamwaq.yaml: vx/vy +-0.25/+-0.2 m/s, yaw 2.0 rad/s): longer forward and
   # lateral steps, faster yaw. Yaw stays inside the vendor limit.
-  twist_cmd.ranges.lin_vel_x = (-0.4, 0.6)
-  twist_cmd.ranges.lin_vel_y = (-0.45, 0.45)
+  twist_cmd.ranges.lin_vel_x = (-0.35, 0.55)
+  twist_cmd.ranges.lin_vel_y = (-0.3, 0.3)
   twist_cmd.ranges.ang_vel_z = (-1.5, 1.5)
   # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
   twist_cmd.rel_forward_envs = 0.0
@@ -185,11 +185,11 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # smaller Mini-Pi range; widened from 0.125 for commands up to 0.6 m/s.
   cfg.rewards["track_linear_velocity"].params["std"] = 0.2
 
-  # Tracking below the generic 2.0 so it does not dominate gait formation, raised
-  # from 1.0 once the gait was established. Roll and pitch rates count 0.05x so
-  # natural walking sway is not punished like yaw error.
-  cfg.rewards["track_linear_velocity"].weight = 1.5
-  cfg.rewards["track_angular_velocity"].weight = 1.25
+  # Tracking started at 1.0 so it would not dominate gait formation, and is raised
+  # now that the gait is established. Roll and pitch rates count 0.05x so natural
+  # walking sway is not punished like yaw error.
+  cfg.rewards["track_linear_velocity"].weight = 2.0
+  cfg.rewards["track_angular_velocity"].weight = 1.5
   cfg.rewards["track_angular_velocity"].params["xy_weight"] = 0.05
   # Wider than the generic sqrt(0.5) for yaw commands up to 1.5 rad/s.
   cfg.rewards["track_angular_velocity"].params["std"] = 0.8
@@ -221,14 +221,14 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   for reward_name in ["foot_clearance", "foot_slip"]:
     cfg.rewards[reward_name].params["asset_cfg"].site_names = site_names
 
-  # Soft minimum on lateral foot spacing in the base frame (nominal stance is about
-  # 0.16 m). No upper bound, so the stance can widen freely. Also logs the
-  # foot_separation_* metrics.
+  # Minimum lateral foot spacing in the base frame, at the nominal 0.16 m stance. No
+  # upper bound, so the stance can widen freely. Also logs the foot_separation_*
+  # metrics.
   cfg.rewards["feet_separation"] = RewardTermCfg(
     func=mdp.feet_separation,
-    weight=-1.0,
+    weight=-1.5,
     params={
-      "min_separation": 0.15,
+      "min_separation": 0.16,
       "asset_cfg": SceneEntityCfg("robot", site_names=site_names),
     },
   )

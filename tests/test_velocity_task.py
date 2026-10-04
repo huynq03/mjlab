@@ -260,8 +260,8 @@ def test_minipi_velocity_command_ranges(minipi_velocity_task_ids: list[str]) -> 
 
     twist_cmd = cfg.commands["twist"]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
-    assert twist_cmd.ranges.lin_vel_x == (-0.4, 0.6)
-    assert twist_cmd.ranges.lin_vel_y == (-0.45, 0.45)
+    assert twist_cmd.ranges.lin_vel_x == (-0.35, 0.55)
+    assert twist_cmd.ranges.lin_vel_y == (-0.3, 0.3)
     assert twist_cmd.ranges.ang_vel_z == (-1.5, 1.5)
     assert twist_cmd.rel_standing_envs == pytest.approx(0.1)
     # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
@@ -279,12 +279,12 @@ def test_minipi_velocity_locomotion_finetune_config(
     rewards = cfg.rewards
 
     expected_weights = {
-      "track_linear_velocity": 1.5,
-      "track_angular_velocity": 1.25,
+      "track_linear_velocity": 2.0,
+      "track_angular_velocity": 1.5,
       "foot_gait": 0.75,
       "foot_clearance": -1.0,
       "foot_swing_height": -1.0,
-      "feet_separation": -1.0,
+      "feet_separation": -1.5,
       "foot_slip": -0.25,
       "action_rate_l2": -0.05,
       "stand_still": -1.0,
@@ -302,7 +302,7 @@ def test_minipi_velocity_locomotion_finetune_config(
     assert rewards["track_angular_velocity"].params["std"] == pytest.approx(0.8)
     assert "feet_distance" not in rewards
     separation = rewards["feet_separation"].params
-    assert separation["min_separation"] == pytest.approx(0.15)
+    assert separation["min_separation"] == pytest.approx(0.16)
     assert separation["asset_cfg"].site_names == ("r_foot", "l_foot")
     for name in ["foot_clearance", "foot_swing_height"]:
       assert rewards[name].params["target_height"] == pytest.approx(0.05), name
@@ -391,8 +391,8 @@ def test_minipi_flat_commands_are_bounded_and_standing_is_zero() -> None:
 
   assert standing.any() and not standing.all()
   assert (command[standing] == 0.0).all()
-  assert ((command[:, 0] >= -0.4) & (command[:, 0] <= 0.6)).all()
-  assert (command[:, 1].abs() <= 0.45).all()
+  assert ((command[:, 0] >= -0.35) & (command[:, 0] <= 0.55)).all()
+  assert (command[:, 1].abs() <= 0.3).all()
   assert (command[:, 2].abs() <= 1.5).all()
   # Deadzone: every command is either exactly zero or clearly above 0.1.
   norm = command.norm(dim=1)

@@ -50,6 +50,8 @@ class UniformVelocityCommand(CommandTerm):
     self.episode_start_pos_w = torch.zeros(self.num_envs, 2, device=self.device)
 
     self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
+    self.metrics["error_vel_x"] = torch.zeros(self.num_envs, device=self.device)
+    self.metrics["error_vel_y"] = torch.zeros(self.num_envs, device=self.device)
     self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
 
     # Set by create_gui() when the viewer is active.
@@ -64,12 +66,12 @@ class UniformVelocityCommand(CommandTerm):
   def _update_metrics(self) -> None:
     max_command_time = self.cfg.resampling_time_range[1]
     max_command_step = max_command_time / self._env.step_dt
-    self.metrics["error_vel_xy"] += (
-      torch.norm(
-        self.vel_command_b[:, :2] - self.robot.data.root_link_lin_vel_b[:, :2], dim=-1
-      )
-      / max_command_step
+    lin_vel_error = (
+      self.vel_command_b[:, :2] - self.robot.data.root_link_lin_vel_b[:, :2]
     )
+    self.metrics["error_vel_xy"] += torch.norm(lin_vel_error, dim=-1) / max_command_step
+    self.metrics["error_vel_x"] += torch.abs(lin_vel_error[:, 0]) / max_command_step
+    self.metrics["error_vel_y"] += torch.abs(lin_vel_error[:, 1]) / max_command_step
     self.metrics["error_vel_yaw"] += (
       torch.abs(self.vel_command_b[:, 2] - self.robot.data.root_link_ang_vel_b[:, 2])
       / max_command_step

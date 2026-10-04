@@ -265,10 +265,10 @@ def test_stand_still_only_penalizes_at_zero_command(command, expected):
 @pytest.mark.parametrize(
   ("separation", "yaw", "expected"),
   [
-    (0.16, 0.0, 0.0),  # Nominal stance: no cost.
+    (0.17, 0.0, 0.0),  # At or above the minimum: no cost.
     (0.30, 0.0, 0.0),  # Wide stance: no upper bound.
-    (0.075, 0.0, 0.25),  # Half the minimum: ((0.15 - 0.075) / 0.15)^2.
-    (0.075, math.pi / 2, 0.25),  # Measured in the base frame, not world y.
+    (0.08, 0.0, 0.75),  # Half the minimum: d = 0.5, d + d^2 = 0.75.
+    (0.08, math.pi / 2, 0.75),  # Measured in the base frame, not world y.
   ],
 )
 def test_feet_separation_penalizes_close_feet(separation, yaw, expected):
@@ -288,11 +288,11 @@ def test_feet_separation_penalizes_close_feet(separation, yaw, expected):
   env = SimpleNamespace(scene={"robot": asset}, extras={"log": {}})
   cost = feet_separation(
     env,  # type: ignore[arg-type]
-    min_separation=0.15,
+    min_separation=0.16,
     asset_cfg=SceneEntityCfg("robot", site_ids=[0, 1]),
   )
   assert cost.item() == pytest.approx(expected, abs=1e-6)
   log = env.extras["log"]
   assert log["Metrics/foot_separation_mean"].item() == pytest.approx(separation)
   assert log["Metrics/foot_separation_min"].item() == pytest.approx(separation)
-  assert log["Metrics/foot_too_close_fraction"].item() == float(separation < 0.15)
+  assert log["Metrics/foot_too_close_fraction"].item() == float(separation < 0.16)
