@@ -120,13 +120,12 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   assert isinstance(twist_cmd, UniformVelocityCommandCfg)
   twist_cmd.viz.z_offset = 0.3
 
-  # Lateral limit is HighTorque's Mini-Pi RL deployment limit (sim2real
-  # walk/dreamwaq.yaml, the config the PD gains come from). Forward is widened past
-  # the vendor's +-0.25 m/s for longer steps. The vendor clamps yaw at 2.0 rad/s; we
-  # keep the generic 0.5.
+  # Widened past HighTorque's Mini-Pi RL deployment limits (sim2real
+  # walk/dreamwaq.yaml: vx/vy +-0.25/+-0.2 m/s, yaw 2.0 rad/s): longer forward steps,
+  # more lateral and yaw coverage.
   twist_cmd.ranges.lin_vel_x = (-0.3, 0.4)
-  twist_cmd.ranges.lin_vel_y = (-0.2, 0.2)
-  twist_cmd.ranges.ang_vel_z = (-0.5, 0.5)
+  twist_cmd.ranges.lin_vel_y = (-0.3, 0.3)
+  twist_cmd.ranges.ang_vel_z = (-0.75, 0.75)
   # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
   twist_cmd.rel_forward_envs = 0.0
   twist_cmd.command_deadzone = _COMMAND_THRESHOLD
@@ -164,10 +163,10 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # yaw, calf_joint is the knee). Not tuned for Mini-Pi.
   cfg.rewards["pose"].params["std_standing"] = {".*": 0.05}
   cfg.rewards["pose"].params["std_walking"] = {
-    r".*_hip_pitch_joint": 0.6,
+    r".*_hip_pitch_joint": 0.65,
     r".*_hip_roll_joint": 0.15,
     r".*_thigh_joint": 0.15,
-    r".*_calf_joint": 0.55,
+    r".*_calf_joint": 0.6,
     r".*_ankle_pitch_joint": 0.25,
     r".*_ankle_roll_joint": 0.1,
   }
@@ -200,7 +199,7 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # phase observation.
   cfg.rewards["foot_gait"] = RewardTermCfg(
     func=mdp.feet_gait,
-    weight=0.5,
+    weight=0.75,
     params={
       "sensor_name": feet_ground_cfg.name,
       "period": _GAIT_PERIOD,
@@ -225,9 +224,9 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.rewards["air_time"].weight = 0.0
 
   # Lighter clearance shaping and smoothness, stronger slip penalty, so stepping
-  # beats shuffling. foot_swing_height lightly pulls the landing peak toward 5 cm.
+  # beats shuffling. foot_swing_height pulls the landing peak toward 5 cm.
   cfg.rewards["foot_clearance"].weight = -1.0
-  cfg.rewards["foot_swing_height"].weight = -0.15
+  cfg.rewards["foot_swing_height"].weight = -0.5
   cfg.rewards["foot_slip"].weight = -0.25
   cfg.rewards["action_rate_l2"].weight = -0.05
 
