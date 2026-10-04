@@ -126,12 +126,12 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   assert isinstance(twist_cmd, UniformVelocityCommandCfg)
   twist_cmd.viz.z_offset = 0.3
 
-  # Final ranges, widened past HighTorque's Mini-Pi RL deployment limits (sim2real
-  # walk/dreamwaq.yaml: vx/vy +-0.25/+-0.2 m/s, yaw 2.0 rad/s): longer forward and
-  # lateral steps, faster yaw. Yaw stays inside the vendor limit. Training starts
-  # with narrower y/yaw ranges (curriculum below); play uses these directly.
+  # Final ranges. HighTorque's Mini-Pi RL deployment limits (sim2real
+  # walk/dreamwaq.yaml) are vx/vy +-0.25/+-0.2 m/s and yaw 2.0 rad/s: x is widened
+  # for longer steps, y sits at the vendor limit, yaw stays inside it. Training
+  # starts with narrower y/yaw ranges (curriculum below); play uses these directly.
   twist_cmd.ranges.lin_vel_x = (-0.35, 0.55)
-  twist_cmd.ranges.lin_vel_y = (-0.3, 0.3)
+  twist_cmd.ranges.lin_vel_y = (-0.2, 0.2)
   twist_cmd.ranges.ang_vel_z = (-1.5, 1.5)
   # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
   twist_cmd.rel_forward_envs = 0.0
@@ -145,11 +145,12 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # Mini-Pi curriculum (replaces the generic one that ramps vx up to 3 m/s): x stays
   # at its final range, y and yaw widen in four stages to their final ranges.
+  # y reaches its final +-0.2 at stage 3; stage 4 only widens yaw.
   stage_ranges = [
-    ((-0.15, 0.15), (-0.75, 0.75)),
-    ((-0.2, 0.2), (-1.0, 1.0)),
-    ((-0.25, 0.25), (-1.25, 1.25)),
-    ((-0.3, 0.3), (-1.5, 1.5)),
+    ((-0.1, 0.1), (-0.75, 0.75)),
+    ((-0.15, 0.15), (-1.0, 1.0)),
+    ((-0.2, 0.2), (-1.25, 1.25)),
+    ((-0.2, 0.2), (-1.5, 1.5)),
   ]
   cfg.curriculum["command_vel"] = CurriculumTermCfg(
     func=mdp.commands_vel,

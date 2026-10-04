@@ -24,6 +24,12 @@ if TYPE_CHECKING:
 class UniformVelocityCommand(CommandTerm):
   cfg: UniformVelocityCommandCfg
 
+  # Values of ``command_mode``. Standing envs keep MODE_MIXED; use is_standing_env.
+  MODE_MIXED = 0
+  MODE_X_ONLY = 1
+  MODE_Y_ONLY = 2
+  MODE_YAW_ONLY = 3
+
   def __init__(self, cfg: UniformVelocityCommandCfg, env: ManagerBasedRlEnv):
     super().__init__(cfg, env)
 
@@ -54,6 +60,8 @@ class UniformVelocityCommand(CommandTerm):
     self.is_standing_env = torch.zeros_like(self.is_heading_env)
     self.is_world_env = torch.zeros_like(self.is_heading_env)
     self.is_forward_env = torch.zeros_like(self.is_heading_env)
+    # Command mode assigned at the last resample (see MODE_* above).
+    self.command_mode = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
     # World-frame integral of the commanded linear velocity over the episode.
     self.commanded_displacement_w = torch.zeros(self.num_envs, 2, device=self.device)
@@ -103,10 +111,22 @@ class UniformVelocityCommand(CommandTerm):
     log["Metrics/twist/actual_abs_y"] = lin_vel[:, 1].abs().mean()
     log["Metrics/twist/actual_abs_yaw"] = ang_vel[:, 2].abs().mean()
     # Of the envs with a clear lateral command, the fraction moving the right way.
-    lateral = (cmd[:, 1].abs() > 0.1).float()
     match = (torch.sign(lin_vel[:, 1]) == torch.sign(cmd[:, 1])).float()
-    log["Metrics/twist/y_sign_match_fraction"] = (match * lateral).sum() / (
-      lateral.sum().clamp(min=1.0)
+    log["Metrics/twist/y_sign_match_fraction"] = _masked_mean(
+      match, cmd[:, 1].abs() > 0.1
+    )
+    # Lateral drift/sway when no lateral motion is asked for.
+    log["Metrics/twist/actual_vel_y_when_cmd_y_zero"] = _masked_mean(
+      lin_vel[:, 1].abs(), cmd[:, 1].abs() <= 0.05
+    )
+    # Lateral tracking split by command mode, from the stored mode assignment.
+    error_y = (cmd[:, 1] - lin_vel[:, 1]).abs()
+    moving = ~self.is_standing_env
+    log["Metrics/twist/error_vel_y_pure_lateral"] = _masked_mean(
+      error_y, moving & (self.command_mode == self.MODE_Y_ONLY)
+    )
+    log["Metrics/twist/error_vel_y_mixed"] = _masked_mean(
+      error_y, moving & (self.command_mode == self.MODE_MIXED)
     )
 
   def _resample_command(self, env_ids: torch.Tensor) -> None:
@@ -149,6 +169,7 @@ class UniformVelocityCommand(CommandTerm):
     commands never collapse to standing. Heading control is off for these envs so
     the commanded yaw rate is exactly what the mode asks for.
     """
+    self.command_mode[env_ids] = self.MODE_MIXED
     fractions = (
       self.cfg.rel_lin_x_only_envs,
       self.cfg.rel_lin_y_only_envs,
@@ -171,6 +192,7 @@ class UniformVelocityCommand(CommandTerm):
       if len(ids) == 0:
         continue
       single_axis |= in_mode
+      self.command_mode[ids] = axis + 1  # MODE_X_ONLY, MODE_Y_ONLY, MODE_YAW_ONLY.
       self.vel_command_b[ids] = 0.0
       self.vel_command_b[ids, axis] = self._uniform_outside_deadzone(len(ids), lo, hi)
     self.is_heading_env[env_ids[single_axis]] = False
@@ -399,6 +421,12 @@ class UniformVelocityCommand(CommandTerm):
       visualizer.add_arrow(
         act_ang_from, act_ang_to, color=(0.0, 1.0, 0.4, 0.7), width=0.015
       )
+
+
+def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+  """Mean of ``values`` over ``mask``; zero when the mask is empty."""
+  mask_f = mask.float()
+  return (values * mask_f).sum() / mask_f.sum().clamp(min=1.0)
 
 
 @dataclass(kw_only=True)

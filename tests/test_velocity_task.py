@@ -261,18 +261,19 @@ def test_minipi_velocity_command_ranges(minipi_velocity_task_ids: list[str]) -> 
     twist_cmd = cfg.commands["twist"]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
     assert twist_cmd.ranges.lin_vel_x == (-0.35, 0.55)
-    assert twist_cmd.ranges.lin_vel_y == (-0.3, 0.3)
+    assert twist_cmd.ranges.lin_vel_y == (-0.2, 0.2)
     assert twist_cmd.ranges.ang_vel_z == (-1.5, 1.5)
     assert twist_cmd.rel_standing_envs == pytest.approx(0.1)
     # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
     assert twist_cmd.rel_forward_envs == 0.0
-    # Mini-Pi curriculum: x fixed, y and yaw widen in four stages to the final range.
+    # Mini-Pi curriculum: x fixed, y and yaw widen to the final range (y in three
+    # stages, held at +-0.2 in the fourth).
     stages = cfg.curriculum["command_vel"].params["velocity_stages"]
     assert [s["lin_vel_y"] for s in stages] == [
+      (-0.1, 0.1),
       (-0.15, 0.15),
       (-0.2, 0.2),
-      (-0.25, 0.25),
-      (-0.3, 0.3),
+      (-0.2, 0.2),
     ]
     assert [s["ang_vel_z"] for s in stages] == [
       (-0.75, 0.75),
@@ -412,7 +413,7 @@ def test_minipi_flat_commands_are_bounded_and_standing_is_zero() -> None:
   assert (command[standing] == 0.0).all()
   assert ((command[:, 0] >= -0.35) & (command[:, 0] <= 0.55)).all()
   # The first curriculum stage narrows y and yaw.
-  assert (command[:, 1].abs() <= 0.15).all()
+  assert (command[:, 1].abs() <= 0.1).all()
   assert (command[:, 2].abs() <= 0.75).all()
   # Deadzone: every command is either exactly zero or clearly above 0.1.
   norm = command.norm(dim=1)

@@ -292,3 +292,4 @@ def test_y_only_mode_samples_lateral_outside_deadzone(device):
   assert (command[:, 2] == 0.0).all()
   assert ((command[:, 1].abs() > 0.1) & (command[:, 1].abs() <= 0.15)).all()
   assert not term.is_heading_env.any()
+  assert (term.command_mode == term.MODE_Y_ONLY).all()
