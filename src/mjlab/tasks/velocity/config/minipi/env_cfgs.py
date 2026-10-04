@@ -122,10 +122,10 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # Widened past HighTorque's Mini-Pi RL deployment limits (sim2real
   # walk/dreamwaq.yaml: vx/vy +-0.25/+-0.2 m/s, yaw 2.0 rad/s): longer forward and
-  # lateral steps, faster yaw. Yaw stays inside the vendor limit.
+  # lateral steps, faster yaw (also past the vendor yaw limit).
   twist_cmd.ranges.lin_vel_x = (-0.4, 0.6)
   twist_cmd.ranges.lin_vel_y = (-0.45, 0.45)
-  twist_cmd.ranges.ang_vel_z = (-1.2, 1.2)
+  twist_cmd.ranges.ang_vel_z = (-2.5, 2.5)
   # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
   twist_cmd.rel_forward_envs = 0.0
   twist_cmd.command_deadzone = _COMMAND_THRESHOLD
@@ -159,16 +159,18 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
   cfg.events["base_com"].params["asset_cfg"].body_names = ("base_link",)
 
-  # First-run baseline tolerances mapped from G1's lower body (thigh_joint is the hip
-  # yaw, calf_joint is the knee). Not tuned for Mini-Pi.
+  # Unitree G1 philosophy (thigh_joint is the hip yaw, calf_joint is the knee):
+  # sagittal joints loose for long strides, lateral/yaw joints tight so the feet
+  # don't collapse inward or cross. Stance width comes from this prior, not from a
+  # foot-distance reward.
   cfg.rewards["pose"].params["std_standing"] = {".*": 0.05}
   cfg.rewards["pose"].params["std_walking"] = {
     r".*_hip_pitch_joint": 0.8,
-    r".*_hip_roll_joint": 0.25,
-    r".*_thigh_joint": 0.3,
+    r".*_hip_roll_joint": 0.2,
+    r".*_thigh_joint": 0.22,
     r".*_calf_joint": 0.7,
     r".*_ankle_pitch_joint": 0.35,
-    r".*_ankle_roll_joint": 0.15,
+    r".*_ankle_roll_joint": 0.12,
   }
   cfg.rewards["pose"].params["std_running"] = {
     r".*_hip_pitch_joint": 0.5,
@@ -188,6 +190,8 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.rewards["track_linear_velocity"].weight = 1.0
   cfg.rewards["track_angular_velocity"].weight = 1.0
   cfg.rewards["track_angular_velocity"].params["xy_weight"] = 0.05
+  # Wider than the generic sqrt(0.5) for yaw commands up to 2.5 rad/s.
+  cfg.rewards["track_angular_velocity"].params["std"] = 1.2
 
   # Stand/walk switches match the command deadzone.
   cfg.rewards["pose"].params["walking_threshold"] = _COMMAND_THRESHOLD

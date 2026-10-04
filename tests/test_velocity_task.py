@@ -262,7 +262,7 @@ def test_minipi_velocity_command_ranges(minipi_velocity_task_ids: list[str]) -> 
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
     assert twist_cmd.ranges.lin_vel_x == (-0.4, 0.6)
     assert twist_cmd.ranges.lin_vel_y == (-0.45, 0.45)
-    assert twist_cmd.ranges.ang_vel_z == (-1.2, 1.2)
+    assert twist_cmd.ranges.ang_vel_z == (-2.5, 2.5)
     assert twist_cmd.rel_standing_envs == pytest.approx(0.1)
     # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
     assert twist_cmd.rel_forward_envs == 0.0
@@ -298,6 +298,8 @@ def test_minipi_velocity_locomotion_finetune_config(
       assert rewards[name].weight == pytest.approx(weight), name
     assert rewards["track_angular_velocity"].params["xy_weight"] == 0.05
     assert rewards["track_linear_velocity"].params["std"] == pytest.approx(0.2)
+    assert rewards["track_angular_velocity"].params["std"] == pytest.approx(1.2)
+    assert "feet_distance" not in rewards
     for name in ["foot_clearance", "foot_swing_height"]:
       assert rewards[name].params["target_height"] == pytest.approx(0.05), name
 
@@ -323,11 +325,11 @@ def test_minipi_velocity_locomotion_finetune_config(
     assert pose["std_standing"] == {".*": 0.05}
     assert pose["std_walking"] == {
       r".*_hip_pitch_joint": 0.8,
-      r".*_hip_roll_joint": 0.25,
-      r".*_thigh_joint": 0.3,
+      r".*_hip_roll_joint": 0.2,
+      r".*_thigh_joint": 0.22,
       r".*_calf_joint": 0.7,
       r".*_ankle_pitch_joint": 0.35,
-      r".*_ankle_roll_joint": 0.15,
+      r".*_ankle_roll_joint": 0.12,
     }
 
     # One gait clock for the reward and the phase observation, in both groups.
@@ -387,7 +389,7 @@ def test_minipi_flat_commands_are_bounded_and_standing_is_zero() -> None:
   assert (command[standing] == 0.0).all()
   assert ((command[:, 0] >= -0.4) & (command[:, 0] <= 0.6)).all()
   assert (command[:, 1].abs() <= 0.45).all()
-  assert (command[:, 2].abs() <= 1.2).all()
+  assert (command[:, 2].abs() <= 2.5).all()
   # Deadzone: every command is either exactly zero or clearly above 0.1.
   norm = command.norm(dim=1)
   assert ((norm == 0.0) | (norm > 0.1)).all()
