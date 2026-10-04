@@ -122,10 +122,10 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # Widened past HighTorque's Mini-Pi RL deployment limits (sim2real
   # walk/dreamwaq.yaml: vx/vy +-0.25/+-0.2 m/s, yaw 2.0 rad/s): longer forward and
-  # lateral steps, faster yaw (also past the vendor yaw limit).
+  # lateral steps, faster yaw. Yaw stays inside the vendor limit.
   twist_cmd.ranges.lin_vel_x = (-0.4, 0.6)
   twist_cmd.ranges.lin_vel_y = (-0.45, 0.45)
-  twist_cmd.ranges.ang_vel_z = (-2.5, 2.5)
+  twist_cmd.ranges.ang_vel_z = (-1.5, 1.5)
   # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
   twist_cmd.rel_forward_envs = 0.0
   twist_cmd.command_deadzone = _COMMAND_THRESHOLD
@@ -162,15 +162,15 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # Unitree G1 philosophy (thigh_joint is the hip yaw, calf_joint is the knee):
   # sagittal joints loose for long strides, lateral/yaw joints tight so the feet
   # don't collapse inward or cross. Stance width comes from this prior, not from a
-  # foot-distance reward.
+  # strong foot-distance reward (feet_separation only sets a soft minimum).
   cfg.rewards["pose"].params["std_standing"] = {".*": 0.05}
   cfg.rewards["pose"].params["std_walking"] = {
     r".*_hip_pitch_joint": 0.8,
-    r".*_hip_roll_joint": 0.2,
-    r".*_thigh_joint": 0.22,
+    r".*_hip_roll_joint": 0.15,
+    r".*_thigh_joint": 0.15,
     r".*_calf_joint": 0.7,
     r".*_ankle_pitch_joint": 0.35,
-    r".*_ankle_roll_joint": 0.12,
+    r".*_ankle_roll_joint": 0.1,
   }
   cfg.rewards["pose"].params["std_running"] = {
     r".*_hip_pitch_joint": 0.5,
@@ -185,13 +185,14 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # smaller Mini-Pi range; widened from 0.125 for commands up to 0.6 m/s.
   cfg.rewards["track_linear_velocity"].params["std"] = 0.2
 
-  # Tracking at 1.0 (generic 2.0) so it does not dominate gait formation. Roll and
-  # pitch rates count 0.05x so natural walking sway is not punished like yaw error.
-  cfg.rewards["track_linear_velocity"].weight = 1.0
-  cfg.rewards["track_angular_velocity"].weight = 1.0
+  # Tracking below the generic 2.0 so it does not dominate gait formation, raised
+  # from 1.0 once the gait was established. Roll and pitch rates count 0.05x so
+  # natural walking sway is not punished like yaw error.
+  cfg.rewards["track_linear_velocity"].weight = 1.5
+  cfg.rewards["track_angular_velocity"].weight = 1.25
   cfg.rewards["track_angular_velocity"].params["xy_weight"] = 0.05
-  # Wider than the generic sqrt(0.5) for yaw commands up to 2.5 rad/s.
-  cfg.rewards["track_angular_velocity"].params["std"] = 1.2
+  # Wider than the generic sqrt(0.5) for yaw commands up to 1.5 rad/s.
+  cfg.rewards["track_angular_velocity"].params["std"] = 0.8
 
   # Stand/walk switches match the command deadzone.
   cfg.rewards["pose"].params["walking_threshold"] = _COMMAND_THRESHOLD
@@ -219,6 +220,18 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   for reward_name in ["foot_clearance", "foot_slip"]:
     cfg.rewards[reward_name].params["asset_cfg"].site_names = site_names
+
+  # Soft minimum on lateral foot spacing in the base frame (nominal stance is about
+  # 0.16 m). No upper bound, so the stance can widen freely. Also logs the
+  # foot_separation_* metrics.
+  cfg.rewards["feet_separation"] = RewardTermCfg(
+    func=mdp.feet_separation,
+    weight=-1.0,
+    params={
+      "min_separation": 0.15,
+      "asset_cfg": SceneEntityCfg("robot", site_names=site_names),
+    },
+  )
 
   for reward_name in ["foot_clearance", "foot_swing_height"]:
     cfg.rewards[reward_name].params["target_height"] = _FOOT_CLEARANCE

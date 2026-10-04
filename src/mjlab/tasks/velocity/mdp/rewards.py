@@ -291,6 +291,41 @@ def stand_still(
   return cost * (total_command <= command_threshold).float()
 
 
+def foot_lateral_separation(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+  """Lateral distance between two foot sites, measured in the base frame.
+
+  ``asset_cfg`` must resolve to exactly two sites. Returns a tensor of shape [B].
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  foot_pos_w = asset.data.site_pos_w[:, asset_cfg.site_ids]  # [B, 2, 3]
+  assert foot_pos_w.shape[1] == 2, "Expected exactly two foot sites."
+  rel_w = foot_pos_w - asset.data.root_link_pos_w.unsqueeze(1)
+  quat = asset.data.root_link_quat_w.unsqueeze(1).expand(-1, 2, -1)
+  rel_b = quat_apply_inverse(quat, rel_w)  # [B, 2, 3]
+  return torch.abs(rel_b[:, 0, 1] - rel_b[:, 1, 1])
+
+
+def feet_separation(
+  env: ManagerBasedRlEnv,
+  min_separation: float,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize feet closer than ``min_separation`` laterally in the base frame.
+
+  The cost is ``((min_separation - separation) / min_separation)^2`` below the
+  minimum and zero above it; there is no upper bound.
+  """
+  separation = foot_lateral_separation(env, asset_cfg)
+  too_close = ((min_separation - separation) / min_separation).clamp(min=0.0)
+  log = env.extras["log"]
+  log["Metrics/foot_separation_mean"] = separation.mean()
+  log["Metrics/foot_separation_min"] = separation.min()
+  log["Metrics/foot_too_close_fraction"] = (separation < min_separation).float().mean()
+  return torch.square(too_close)
+
+
 def feet_clearance(
   env: ManagerBasedRlEnv,
   target_height: float,

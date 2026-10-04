@@ -12,7 +12,12 @@ import torch
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import RayCastData, RayCastSensor
-from mjlab.tasks.velocity.mdp.rewards import feet_gait, stand_still, upright
+from mjlab.tasks.velocity.mdp.rewards import (
+  feet_gait,
+  feet_separation,
+  stand_still,
+  upright,
+)
 from mjlab.utils.lab_api.math import quat_from_euler_xyz
 
 
@@ -255,3 +260,39 @@ def test_stand_still_only_penalizes_at_zero_command(command, expected):
     asset_cfg=SceneEntityCfg("robot", joint_ids=slice(None)),
   )
   assert cost.item() == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+  ("separation", "yaw", "expected"),
+  [
+    (0.16, 0.0, 0.0),  # Nominal stance: no cost.
+    (0.30, 0.0, 0.0),  # Wide stance: no upper bound.
+    (0.075, 0.0, 0.25),  # Half the minimum: ((0.15 - 0.075) / 0.15)^2.
+    (0.075, math.pi / 2, 0.25),  # Measured in the base frame, not world y.
+  ],
+)
+def test_feet_separation_penalizes_close_feet(separation, yaw, expected):
+  c, s = math.cos(yaw), math.sin(yaw)
+  base_pos = torch.tensor([1.0, 2.0, 0.3])
+  # Right and left feet in the base frame, rotated by yaw into the world frame.
+  feet_b = torch.tensor([[0.05, -separation / 2, -0.3], [-0.05, separation / 2, -0.3]])
+  x_w = c * feet_b[:, 0] - s * feet_b[:, 1]
+  y_w = s * feet_b[:, 0] + c * feet_b[:, 1]
+  feet_w = torch.stack([x_w, y_w, feet_b[:, 2]], dim=1)
+  asset = MagicMock()
+  asset.data.site_pos_w = (feet_w + base_pos).unsqueeze(0)
+  asset.data.root_link_pos_w = base_pos.unsqueeze(0)
+  asset.data.root_link_quat_w = torch.tensor(
+    [[math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]]
+  )
+  env = SimpleNamespace(scene={"robot": asset}, extras={"log": {}})
+  cost = feet_separation(
+    env,  # type: ignore[arg-type]
+    min_separation=0.15,
+    asset_cfg=SceneEntityCfg("robot", site_ids=[0, 1]),
+  )
+  assert cost.item() == pytest.approx(expected, abs=1e-6)
+  log = env.extras["log"]
+  assert log["Metrics/foot_separation_mean"].item() == pytest.approx(separation)
+  assert log["Metrics/foot_separation_min"].item() == pytest.approx(separation)
+  assert log["Metrics/foot_too_close_fraction"].item() == float(separation < 0.15)
