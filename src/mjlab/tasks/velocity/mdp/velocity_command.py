@@ -31,6 +31,16 @@ class UniformVelocityCommand(CommandTerm):
       raise ValueError("heading_command=True but ranges.heading is set to None.")
     if self.cfg.ranges.heading and not self.cfg.heading_command:
       raise ValueError("ranges.heading is set but heading_command=False.")
+    mode_total = (
+      self.cfg.rel_standing_envs
+      + self.cfg.rel_lin_x_only_envs
+      + self.cfg.rel_lin_y_only_envs
+      + self.cfg.rel_ang_z_only_envs
+    )
+    if mode_total > 1.0 + 1e-6:
+      raise ValueError(
+        f"Standing and single-axis command fractions sum to {mode_total} > 1."
+      )
 
     self.robot: Entity = env.scene[cfg.entity_name]
 
@@ -76,18 +86,42 @@ class UniformVelocityCommand(CommandTerm):
       torch.abs(self.vel_command_b[:, 2] - self.robot.data.root_link_ang_vel_b[:, 2])
       / max_command_step
     )
+    self._log_step_diagnostics()
+
+  def _log_step_diagnostics(self) -> None:
+    """Per-step command/velocity magnitudes and lateral sign agreement."""
+    log = getattr(self._env, "extras", {}).get("log")
+    if log is None:
+      return
+    cmd = self.vel_command_b
+    lin_vel = self.robot.data.root_link_lin_vel_b
+    ang_vel = self.robot.data.root_link_ang_vel_b
+    log["Metrics/twist/command_abs_x"] = cmd[:, 0].abs().mean()
+    log["Metrics/twist/command_abs_y"] = cmd[:, 1].abs().mean()
+    log["Metrics/twist/command_abs_yaw"] = cmd[:, 2].abs().mean()
+    log["Metrics/twist/actual_abs_x"] = lin_vel[:, 0].abs().mean()
+    log["Metrics/twist/actual_abs_y"] = lin_vel[:, 1].abs().mean()
+    log["Metrics/twist/actual_abs_yaw"] = ang_vel[:, 2].abs().mean()
+    # Of the envs with a clear lateral command, the fraction moving the right way.
+    lateral = (cmd[:, 1].abs() > 0.1).float()
+    match = (torch.sign(lin_vel[:, 1]) == torch.sign(cmd[:, 1])).float()
+    log["Metrics/twist/y_sign_match_fraction"] = (match * lateral).sum() / (
+      lateral.sum().clamp(min=1.0)
+    )
 
   def _resample_command(self, env_ids: torch.Tensor) -> None:
     r = torch.empty(len(env_ids), device=self.device)
     self.vel_command_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
     self.vel_command_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
     self.vel_command_b[env_ids, 2] = r.uniform_(*self.cfg.ranges.ang_vel_z)
-    self._apply_deadzone(env_ids)
     if self.cfg.heading_command:
       assert self.cfg.ranges.heading is not None
       self.heading_target[env_ids] = r.uniform_(*self.cfg.ranges.heading)
       self.is_heading_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_heading_envs
-    self.is_standing_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_standing_envs
+    mode_draw = r.uniform_(0.0, 1.0)
+    self.is_standing_env[env_ids] = mode_draw <= self.cfg.rel_standing_envs
+    self._apply_single_axis_modes(env_ids, mode_draw)
+    self._apply_deadzone(env_ids)
 
     # Randomly assign world-frame envs.
     self.is_world_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_world_envs
@@ -103,6 +137,55 @@ class UniformVelocityCommand(CommandTerm):
       )
       self.vel_command_b[fwd_ids, 1] = 0.0
       self.vel_command_b[fwd_ids, 2] = 0.0
+
+  def _apply_single_axis_modes(
+    self, env_ids: torch.Tensor, mode_draw: torch.Tensor
+  ) -> None:
+    """Turn some envs into x-only, y-only or yaw-only commands.
+
+    ``mode_draw`` is the same uniform draw that picks standing envs, so the modes
+    split [0, 1] as: standing, x-only, y-only, yaw-only, then mixed for the rest.
+    The active axis is sampled from its range outside the deadzone, so single-axis
+    commands never collapse to standing. Heading control is off for these envs so
+    the commanded yaw rate is exactly what the mode asks for.
+    """
+    fractions = (
+      self.cfg.rel_lin_x_only_envs,
+      self.cfg.rel_lin_y_only_envs,
+      self.cfg.rel_ang_z_only_envs,
+    )
+    if sum(fractions) <= 0.0:
+      return
+    ranges = (
+      self.cfg.ranges.lin_vel_x,
+      self.cfg.ranges.lin_vel_y,
+      self.cfg.ranges.ang_vel_z,
+    )
+    lower = self.cfg.rel_standing_envs
+    single_axis = torch.zeros_like(mode_draw, dtype=torch.bool)
+    for axis, (fraction, (lo, hi)) in enumerate(zip(fractions, ranges, strict=True)):
+      upper = lower + fraction
+      in_mode = (mode_draw > lower) & (mode_draw <= upper)
+      lower = upper
+      ids = env_ids[in_mode]
+      if len(ids) == 0:
+        continue
+      single_axis |= in_mode
+      self.vel_command_b[ids] = 0.0
+      self.vel_command_b[ids, axis] = self._uniform_outside_deadzone(len(ids), lo, hi)
+    self.is_heading_env[env_ids[single_axis]] = False
+
+  def _uniform_outside_deadzone(self, n: int, lo: float, hi: float) -> torch.Tensor:
+    """Sample uniformly from ``[lo, hi]`` minus ``(-deadzone, deadzone)``."""
+    dz = self.cfg.command_deadzone
+    neg_hi = min(hi, -dz)
+    pos_lo = max(lo, dz)
+    neg_len = max(neg_hi - lo, 0.0)
+    pos_len = max(hi - pos_lo, 0.0)
+    if neg_len + pos_len <= 0.0:
+      return torch.zeros(n, device=self.device)
+    u = torch.empty(n, device=self.device).uniform_(0.0, neg_len + pos_len)
+    return torch.where(u < neg_len, lo + u, pos_lo + (u - neg_len))
 
   def _integrate_command(
     self, dt: float | torch.Tensor, env_ids: torch.Tensor | None
@@ -339,6 +422,14 @@ class UniformVelocityCommandCfg(CommandTermCfg):
   command_deadzone: float = 0.0
   """Commands whose (vx, vy, wz) norm is at or below this value are set to exactly
   zero, so every command is either a clear stand or a clear move. 0 disables it."""
+  rel_lin_x_only_envs: float = 0.0
+  """Fraction of environments with only a lin_vel_x command (vy = wz = 0)."""
+  rel_lin_y_only_envs: float = 0.0
+  """Fraction of environments with only a lin_vel_y command (vx = wz = 0)."""
+  rel_ang_z_only_envs: float = 0.0
+  """Fraction of environments with only an ang_vel_z command (vx = vy = 0). These
+  three modes and ``rel_standing_envs`` must sum to at most 1; the remaining envs
+  get mixed commands."""
 
   @dataclass
   class Ranges:

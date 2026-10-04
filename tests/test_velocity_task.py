@@ -266,7 +266,26 @@ def test_minipi_velocity_command_ranges(minipi_velocity_task_ids: list[str]) -> 
     assert twist_cmd.rel_standing_envs == pytest.approx(0.1)
     # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
     assert twist_cmd.rel_forward_envs == 0.0
-    assert "command_vel" not in cfg.curriculum
+    # Mini-Pi curriculum: x fixed, y and yaw widen in four stages to the final range.
+    stages = cfg.curriculum["command_vel"].params["velocity_stages"]
+    assert [s["lin_vel_y"] for s in stages] == [
+      (-0.15, 0.15),
+      (-0.2, 0.2),
+      (-0.25, 0.25),
+      (-0.3, 0.3),
+    ]
+    assert [s["ang_vel_z"] for s in stages] == [
+      (-0.75, 0.75),
+      (-1.0, 1.0),
+      (-1.25, 1.25),
+      (-1.5, 1.5),
+    ]
+    assert stages[0]["step"] == 0
+    assert all("lin_vel_x" not in s for s in stages)
+    # Command modes: 10% standing, 25% x-only, 20% y-only, 20% yaw-only, 25% mixed.
+    assert twist_cmd.rel_lin_x_only_envs == pytest.approx(0.25)
+    assert twist_cmd.rel_lin_y_only_envs == pytest.approx(0.2)
+    assert twist_cmd.rel_ang_z_only_envs == pytest.approx(0.2)
     assert twist_cmd.command_deadzone == pytest.approx(0.1)
 
 
@@ -298,8 +317,8 @@ def test_minipi_velocity_locomotion_finetune_config(
     for name, weight in expected_weights.items():
       assert rewards[name].weight == pytest.approx(weight), name
     assert rewards["track_angular_velocity"].params["xy_weight"] == 0.05
-    assert rewards["track_linear_velocity"].params["std"] == pytest.approx(0.2)
-    assert rewards["track_angular_velocity"].params["std"] == pytest.approx(0.8)
+    assert rewards["track_linear_velocity"].params["std"] == pytest.approx(0.3)
+    assert rewards["track_angular_velocity"].params["std"] == pytest.approx(1.0)
     assert "feet_distance" not in rewards
     separation = rewards["feet_separation"].params
     assert separation["min_separation"] == pytest.approx(0.16)
@@ -392,8 +411,9 @@ def test_minipi_flat_commands_are_bounded_and_standing_is_zero() -> None:
   assert standing.any() and not standing.all()
   assert (command[standing] == 0.0).all()
   assert ((command[:, 0] >= -0.35) & (command[:, 0] <= 0.55)).all()
-  assert (command[:, 1].abs() <= 0.3).all()
-  assert (command[:, 2].abs() <= 1.5).all()
+  # The first curriculum stage narrows y and yaw.
+  assert (command[:, 1].abs() <= 0.15).all()
+  assert (command[:, 2].abs() <= 0.75).all()
   # Deadzone: every command is either exactly zero or clearly above 0.1.
   norm = command.norm(dim=1)
   assert ((norm == 0.0) | (norm > 0.1)).all()

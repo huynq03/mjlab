@@ -7,6 +7,7 @@ from mjlab.asset_zoo.robots import (
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
@@ -35,6 +36,11 @@ _COMMAND_THRESHOLD = 0.1
 # Gait clock period, shared by the phase observation and the foot_gait reward. The
 # legs are half a period apart, so at vx = 0.4 m/s a step covers 0.4 * 0.25 = 0.1 m.
 _GAIT_PERIOD = 0.5
+
+# Command curriculum: env steps between stages (one step per policy step across all
+# envs, 24 per PPO iteration). The counter restarts at 0 on every launch, including
+# a resumed finetune, so stages are relative to the start of the run.
+_CURRICULUM_STAGE_STEPS = 1000 * 24
 
 
 def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -120,17 +126,41 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   assert isinstance(twist_cmd, UniformVelocityCommandCfg)
   twist_cmd.viz.z_offset = 0.3
 
-  # Widened past HighTorque's Mini-Pi RL deployment limits (sim2real
+  # Final ranges, widened past HighTorque's Mini-Pi RL deployment limits (sim2real
   # walk/dreamwaq.yaml: vx/vy +-0.25/+-0.2 m/s, yaw 2.0 rad/s): longer forward and
-  # lateral steps, faster yaw. Yaw stays inside the vendor limit.
+  # lateral steps, faster yaw. Yaw stays inside the vendor limit. Training starts
+  # with narrower y/yaw ranges (curriculum below); play uses these directly.
   twist_cmd.ranges.lin_vel_x = (-0.35, 0.55)
   twist_cmd.ranges.lin_vel_y = (-0.3, 0.3)
   twist_cmd.ranges.ang_vel_z = (-1.5, 1.5)
   # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
   twist_cmd.rel_forward_envs = 0.0
   twist_cmd.command_deadzone = _COMMAND_THRESHOLD
-  # Fixed command range: the generic curriculum ramps vx up to 3 m/s.
-  cfg.curriculum.pop("command_vel", None)
+
+  # Command modes so lateral and yaw are learned on their own as well as mixed:
+  # 10% standing, 25% x-only, 20% y-only, 20% yaw-only, 25% mixed.
+  twist_cmd.rel_lin_x_only_envs = 0.25
+  twist_cmd.rel_lin_y_only_envs = 0.2
+  twist_cmd.rel_ang_z_only_envs = 0.2
+
+  # Mini-Pi curriculum (replaces the generic one that ramps vx up to 3 m/s): x stays
+  # at its final range, y and yaw widen in four stages to their final ranges.
+  stage_ranges = [
+    ((-0.15, 0.15), (-0.75, 0.75)),
+    ((-0.2, 0.2), (-1.0, 1.0)),
+    ((-0.25, 0.25), (-1.25, 1.25)),
+    ((-0.3, 0.3), (-1.5, 1.5)),
+  ]
+  cfg.curriculum["command_vel"] = CurriculumTermCfg(
+    func=mdp.commands_vel,
+    params={
+      "command_name": "twist",
+      "velocity_stages": [
+        {"step": i * _CURRICULUM_STAGE_STEPS, "lin_vel_y": y, "ang_vel_z": yaw}
+        for i, (y, yaw) in enumerate(stage_ranges)
+      ],
+    },
+  )
 
   # First locomotion finetune: no pushes and no reset drop. Robustness training
   # comes back later.
@@ -182,8 +212,9 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   }
 
   # Narrower than the generic tracking width (std 0.5 for 1 m/s commands) for the
-  # smaller Mini-Pi range; widened from 0.125 for commands up to 0.6 m/s.
-  cfg.rewards["track_linear_velocity"].params["std"] = 0.2
+  # smaller Mini-Pi range. Relaxed from 0.2 while y tracking is still poor, so the
+  # reward keeps a useful gradient far from the target.
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.3
 
   # Tracking started at 1.0 so it would not dominate gait formation, and is raised
   # now that the gait is established. Roll and pitch rates count 0.05x so natural
@@ -191,8 +222,9 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.rewards["track_linear_velocity"].weight = 2.0
   cfg.rewards["track_angular_velocity"].weight = 1.5
   cfg.rewards["track_angular_velocity"].params["xy_weight"] = 0.05
-  # Wider than the generic sqrt(0.5) for yaw commands up to 1.5 rad/s.
-  cfg.rewards["track_angular_velocity"].params["std"] = 0.8
+  # Wider than the generic sqrt(0.5) for yaw commands up to 1.5 rad/s, relaxed from
+  # 0.8 while yaw tracking is still poor.
+  cfg.rewards["track_angular_velocity"].params["std"] = 1.0
 
   # Stand/walk switches match the command deadzone.
   cfg.rewards["pose"].params["walking_threshold"] = _COMMAND_THRESHOLD

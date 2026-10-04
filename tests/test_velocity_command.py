@@ -247,3 +247,48 @@ def test_command_deadzone_applies_to_heading_yaw_rate(device):
   term.reset(env_ids=torch.arange(2, device=device))
   term.compute(dt=0.0)
   assert (term.command == 0.0).all()
+
+
+def test_y_only_mode_samples_lateral_outside_deadzone(device):
+  """Y-only envs get vx = wz = 0, |vy| above the deadzone and no heading control."""
+  num_envs = 64
+  scene, sim = make_scene_and_sim(
+    device,
+    load_fixture_xml("floating_base_articulated"),
+    sensors=(),
+    num_envs=num_envs,
+  )
+  env = cast(
+    "ManagerBasedRlEnv",
+    SimpleNamespace(
+      scene=scene,
+      sim=sim,
+      num_envs=num_envs,
+      device=device,
+      step_dt=0.02,
+      episode_length_buf=torch.zeros(num_envs, dtype=torch.long, device=device),
+    ),
+  )
+  cfg = UniformVelocityCommandCfg(
+    entity_name="robot",
+    resampling_time_range=(1e9, 1e9),
+    heading_command=True,
+    rel_heading_envs=1.0,
+    rel_lin_y_only_envs=1.0,
+    command_deadzone=0.1,
+    ranges=UniformVelocityCommandCfg.Ranges(
+      lin_vel_x=(-0.35, 0.55),
+      lin_vel_y=(-0.15, 0.15),
+      ang_vel_z=(-0.75, 0.75),
+      heading=(-1.0, 1.0),
+    ),
+  )
+  term = cfg.build(env)
+  sim.forward()
+  term.reset(env_ids=torch.arange(num_envs, device=device))
+  term.compute(dt=0.0)
+  command = term.command
+  assert (command[:, 0] == 0.0).all()
+  assert (command[:, 2] == 0.0).all()
+  assert ((command[:, 1].abs() > 0.1) & (command[:, 1].abs() <= 0.15)).all()
+  assert not term.is_heading_env.any()
