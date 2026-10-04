@@ -121,11 +121,11 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   twist_cmd.viz.z_offset = 0.3
 
   # Widened past HighTorque's Mini-Pi RL deployment limits (sim2real
-  # walk/dreamwaq.yaml: vx/vy +-0.25/+-0.2 m/s, yaw 2.0 rad/s): longer forward steps,
-  # more lateral and yaw coverage.
-  twist_cmd.ranges.lin_vel_x = (-0.3, 0.4)
-  twist_cmd.ranges.lin_vel_y = (-0.3, 0.3)
-  twist_cmd.ranges.ang_vel_z = (-0.75, 0.75)
+  # walk/dreamwaq.yaml: vx/vy +-0.25/+-0.2 m/s, yaw 2.0 rad/s): longer forward and
+  # lateral steps, faster yaw. Yaw stays inside the vendor limit.
+  twist_cmd.ranges.lin_vel_x = (-0.4, 0.6)
+  twist_cmd.ranges.lin_vel_y = (-0.45, 0.45)
+  twist_cmd.ranges.ang_vel_z = (-1.2, 1.2)
   # Forward-only envs force vx >= 0.3 m/s, only the top of the range; kept off.
   twist_cmd.rel_forward_envs = 0.0
   twist_cmd.command_deadzone = _COMMAND_THRESHOLD
@@ -163,12 +163,12 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # yaw, calf_joint is the knee). Not tuned for Mini-Pi.
   cfg.rewards["pose"].params["std_standing"] = {".*": 0.05}
   cfg.rewards["pose"].params["std_walking"] = {
-    r".*_hip_pitch_joint": 0.65,
-    r".*_hip_roll_joint": 0.15,
-    r".*_thigh_joint": 0.15,
-    r".*_calf_joint": 0.6,
-    r".*_ankle_pitch_joint": 0.25,
-    r".*_ankle_roll_joint": 0.1,
+    r".*_hip_pitch_joint": 0.8,
+    r".*_hip_roll_joint": 0.25,
+    r".*_thigh_joint": 0.3,
+    r".*_calf_joint": 0.7,
+    r".*_ankle_pitch_joint": 0.35,
+    r".*_ankle_roll_joint": 0.15,
   }
   cfg.rewards["pose"].params["std_running"] = {
     r".*_hip_pitch_joint": 0.5,
@@ -179,9 +179,9 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     r".*_ankle_roll_joint": 0.15,
   }
 
-  # Scales the generic tracking width (std 0.5 for 1 m/s commands) to the original
-  # 0.25 m/s Mini-Pi command range. Not retuned for the 0.4 m/s range.
-  cfg.rewards["track_linear_velocity"].params["std"] = 0.125
+  # Narrower than the generic tracking width (std 0.5 for 1 m/s commands) for the
+  # smaller Mini-Pi range; widened from 0.125 for commands up to 0.6 m/s.
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.2
 
   # Tracking at 1.0 (generic 2.0) so it does not dominate gait formation. Roll and
   # pitch rates count 0.05x so natural walking sway is not punished like yaw error.
@@ -226,7 +226,7 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # Lighter clearance shaping and smoothness, stronger slip penalty, so stepping
   # beats shuffling. foot_swing_height pulls the landing peak toward 5 cm.
   cfg.rewards["foot_clearance"].weight = -1.0
-  cfg.rewards["foot_swing_height"].weight = -0.5
+  cfg.rewards["foot_swing_height"].weight = -1.0
   cfg.rewards["foot_slip"].weight = -0.25
   cfg.rewards["action_rate_l2"].weight = -0.05
 
