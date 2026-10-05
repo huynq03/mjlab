@@ -16,6 +16,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.sensor import ContactSensorCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg
+from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommand, UniformVelocityCommandCfg
 
 
@@ -365,6 +366,28 @@ def test_minipi_velocity_locomotion_finetune_config(
       assert phase_params["period"] == gait["period"]
       assert phase_params["command_threshold"] == pytest.approx(0.1)
 
+    # Unitree actor layout; base linear velocity is critic-only.
+    actor_names = list(cfg.observations["actor"].terms)
+    critic_names = list(cfg.observations["critic"].terms)
+    expected_actor = [
+      "base_ang_vel",
+      "projected_gravity",
+      "command",
+      "phase",
+      "joint_pos",
+      "joint_vel",
+      "actions",
+    ]
+    assert [n for n in actor_names if n != "height_scan"] == expected_actor
+    assert "base_lin_vel" in critic_names
+    assert critic_names[: len(expected_actor)] == expected_actor
+    for group in ("actor", "critic"):
+      assert cfg.observations[group].history_length == 1
+    # Critic foot height is Unitree-style foot site z, right then left.
+    foot_height = cfg.observations["critic"].terms["foot_height"]
+    assert foot_height.func is mdp.foot_site_height
+    assert foot_height.params["asset_cfg"].site_names == ("r_foot", "l_foot")
+
     # Foot order must match the right-then-left model order of the contact channels
     # and site ids, or foot_clearance pairs one foot's height with the other's speed.
     assert rewards["foot_clearance"].params["asset_cfg"].site_names == (
@@ -419,13 +442,17 @@ def test_minipi_flat_commands_are_bounded_and_standing_is_zero() -> None:
   norm = command.norm(dim=1)
   assert ((norm == 0.0) | (norm > 0.1)).all()
 
-  # Policy interface: 48D proprioception + command, plus the 2D gait phase -> 12D.
+  # Policy interface (Unitree layout): 47D actor -> 12D action; the critic adds
+  # base_lin_vel 3 + foot height 2, air time 2, contact 2, contact forces 6.
   obs = env.observation_manager.compute()
   actor_obs = obs["actor"]
+  critic_obs = obs["critic"]
   assert isinstance(actor_obs, torch.Tensor)
-  assert actor_obs.shape == (256, 50)
+  assert isinstance(critic_obs, torch.Tensor)
+  assert actor_obs.shape == (256, 47)
+  assert critic_obs.shape == (256, 62)
   # Phase is [sin, cos] while moving and exactly zero while standing.
-  phase_obs = actor_obs[:, 48:50]  # Right after the 3D command at 45:48.
+  phase_obs = actor_obs[:, 9:11]  # Right after the 3D command at 6:9.
   assert (phase_obs[norm == 0.0] == 0.0).all()
   moving_phase = phase_obs[norm > 0.0]
   assert torch.allclose(moving_phase.norm(dim=1), torch.ones(len(moving_phase)))

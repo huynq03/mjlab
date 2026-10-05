@@ -168,8 +168,8 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.events.pop("push_robot", None)
   cfg.events["reset_base"].params["pose_range"]["z"] = (0.0, 0.0)
 
-  # Gait clock right after the command, as in Unitree's velocity task. The critic
-  # copied the actor terms at build time, so it gets its own entry.
+  # The generic actor/critic already carry the gait phase (Unitree layout); set its
+  # clock to the Mini-Pi gait period. Replacing the term keeps its position.
   phase_obs = ObservationTermCfg(
     func=mdp.phase,
     params={
@@ -179,13 +179,15 @@ def minipi_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     },
   )
   for group in ("actor", "critic"):
-    terms = cfg.observations[group].terms
-    assert "phase" not in terms
-    items = list(terms.items())
-    idx = [name for name, _ in items].index("command") + 1
-    cfg.observations[group].terms = dict(
-      items[:idx] + [("phase", phase_obs)] + items[idx:]
-    )
+    cfg.observations[group].terms["phase"] = phase_obs
+
+  # Critic foot height as in Unitree's velocity task: world z of the foot sites
+  # (right, left), replacing the generic terrain clearance in the same slot. The
+  # foot_height_scan sensor stays for the foot clearance rewards.
+  cfg.observations["critic"].terms["foot_height"] = ObservationTermCfg(
+    func=mdp.foot_site_height,
+    params={"asset_cfg": SceneEntityCfg("robot", site_names=site_names)},
+  )
 
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
   cfg.events["base_com"].params["asset_cfg"].body_names = ("base_link",)
