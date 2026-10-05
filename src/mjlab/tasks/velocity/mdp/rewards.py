@@ -49,10 +49,12 @@ def track_angular_velocity(
   std: float,
   command_name: str,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  xy_weight: float = 1.0,
 ) -> torch.Tensor:
   """Reward heading error for heading-controlled envs, angular velocity for others.
 
-  The commanded xy angular velocities are assumed to be zero.
+  The commanded xy angular velocities are assumed to be zero. ``xy_weight`` scales
+  the roll/pitch rate error relative to the yaw rate error.
   """
   asset: Entity = env.scene[asset_cfg.name]
   command = env.command_manager.get_command(command_name)
@@ -60,7 +62,7 @@ def track_angular_velocity(
   actual = asset.data.root_link_ang_vel_b
   z_error = torch.square(command[:, 2] - actual[:, 2])
   xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
-  ang_vel_error = z_error + xy_error
+  ang_vel_error = z_error + xy_weight * xy_error
   return torch.exp(-ang_vel_error / std**2)
 
 
@@ -236,6 +238,93 @@ def feet_air_time(
       scale = (total_command > command_threshold).float()
       reward *= scale
   return reward
+
+
+def feet_gait(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  period: float,
+  offset: list[float],
+  threshold: float,
+  command_name: str,
+  command_threshold: float = 0.1,
+) -> torch.Tensor:
+  """Reward foot contacts that follow a fixed periodic gait clock.
+
+  Each foot's phase is ``(t / period + offset) % 1``, with ``t`` the episode time. The
+  foot should be in stance while its phase is below ``threshold`` and in swing
+  otherwise. Returns the fraction of feet that match, and zero while the command is
+  at or below ``command_threshold``.
+  """
+  sensor: ContactSensor = env.scene[sensor_name]
+  current_contact_time = sensor.data.current_contact_time
+  assert current_contact_time is not None, "feet_gait requires track_air_time=True."
+  is_contact = current_contact_time > 0  # [B, F]
+  global_phase = (env.episode_length_buf * env.step_dt / period).unsqueeze(1)
+  offsets = torch.as_tensor(offset, device=env.device, dtype=global_phase.dtype)
+  leg_phase = (global_phase + offsets.unsqueeze(0)) % 1.0  # [B, F]
+  is_stance = leg_phase < threshold
+  reward = (is_stance == is_contact).float().mean(dim=1)
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  total_command = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+  return reward * (total_command > command_threshold).float()
+
+
+def stand_still(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  command_threshold: float = 0.1,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize squared deviation from the default joint pose at zero command.
+
+  Active only while the command is at or below ``command_threshold``.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+  default_joint_pos = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+  cost = torch.sum(torch.square(joint_pos - default_joint_pos), dim=1)
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  total_command = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+  return cost * (total_command <= command_threshold).float()
+
+
+def foot_lateral_separation(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+  """Lateral distance between two foot sites, measured in the base frame.
+
+  ``asset_cfg`` must resolve to exactly two sites. Returns a tensor of shape [B].
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  foot_pos_w = asset.data.site_pos_w[:, asset_cfg.site_ids]  # [B, 2, 3]
+  assert foot_pos_w.shape[1] == 2, "Expected exactly two foot sites."
+  rel_w = foot_pos_w - asset.data.root_link_pos_w.unsqueeze(1)
+  quat = asset.data.root_link_quat_w.unsqueeze(1).expand(-1, 2, -1)
+  rel_b = quat_apply_inverse(quat, rel_w)  # [B, 2, 3]
+  return torch.abs(rel_b[:, 0, 1] - rel_b[:, 1, 1])
+
+
+def feet_separation(
+  env: ManagerBasedRlEnv,
+  min_separation: float,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize feet closer than ``min_separation`` laterally in the base frame.
+
+  With ``d = (min_separation - separation) / min_separation`` clamped at zero, the
+  cost is ``d + d^2``: a clear gradient just inside the minimum, growing faster
+  further in. Zero at or above the minimum; there is no upper bound.
+  """
+  separation = foot_lateral_separation(env, asset_cfg)
+  too_close = ((min_separation - separation) / min_separation).clamp(min=0.0)
+  log = env.extras["log"]
+  log["Metrics/foot_separation_mean"] = separation.mean()
+  log["Metrics/foot_separation_min"] = separation.min()
+  log["Metrics/foot_too_close_fraction"] = (separation < min_separation).float().mean()
+  return too_close + torch.square(too_close)
 
 
 def feet_clearance(

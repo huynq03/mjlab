@@ -5,8 +5,24 @@ Changelog
 Upcoming version (not yet released)
 -----------------------------------
 
+Added
+^^^^^
+
+- Added a Mini-Pi checkpoint ONNX export script with metadata and inference checks.
+
+- Added the HighTorque Mini-Pi 12-DOF biped to the asset zoo, with the
+  ``Mjlab-Velocity-Flat-MiniPi`` and ``Mjlab-Velocity-Rough-MiniPi`` tasks.
+
 Changed
 ^^^^^^^
+
+- Velocity task observations now follow the Unitree velocity task layout. The actor
+  is ``base_ang_vel``, ``projected_gravity``, ``command``, ``phase``, ``joint_pos``,
+  ``joint_vel``, ``actions`` (plus ``height_scan`` on rough terrain), and
+  ``base_lin_vel`` moved to the critic only. ``joint_pos`` is the true joint position
+  for actor and critic (no longer ``biased``), so ``encoder_bias`` randomization no
+  longer reaches the velocity policy. Checkpoints trained with the previous actor
+  layout no longer load.
 
 - Bumped ``rsl-rl-lib`` from 5.5.0 to 5.5.1. This removes the need for capping
   ``wandb`` below 0.29.

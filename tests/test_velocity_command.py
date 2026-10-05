@@ -179,3 +179,117 @@ def test_commanded_displacement_and_episode_start(device):
   expected = torch.tensor([[0.0, 0.0], [0.0, 0.52]], device=device)
   assert torch.allclose(term.commanded_displacement_w, expected, atol=1e-5)
   assert torch.allclose(term.episode_start_pos_w, pose[[1, 1], :2], atol=1e-6)
+
+
+def _deadzone_env(scene, sim, device) -> "ManagerBasedRlEnv":
+  return cast(
+    "ManagerBasedRlEnv",
+    SimpleNamespace(
+      scene=scene,
+      sim=sim,
+      num_envs=2,
+      device=device,
+      step_dt=0.02,
+      episode_length_buf=torch.zeros(2, dtype=torch.long, device=device),
+    ),
+  )
+
+
+@pytest.mark.parametrize(
+  ("vx", "expected"),
+  [(0.06, 0.0), (0.1, 0.0), (0.12, 0.12)],
+)
+def test_command_deadzone_zeroes_small_commands(device, vx, expected):
+  """Commands with norm at or below the deadzone become exactly zero."""
+  scene, sim = make_scene_and_sim(
+    device, load_fixture_xml("floating_base_articulated"), sensors=(), num_envs=2
+  )
+  env = _deadzone_env(scene, sim, device)
+  cfg = UniformVelocityCommandCfg(
+    entity_name="robot",
+    resampling_time_range=(1e9, 1e9),
+    rel_heading_envs=0.0,
+    command_deadzone=0.1,
+    ranges=UniformVelocityCommandCfg.Ranges(
+      lin_vel_x=(vx, vx), lin_vel_y=(0.0, 0.0), ang_vel_z=(0.0, 0.0)
+    ),
+  )
+  term = cfg.build(env)
+  sim.forward()
+  term.reset(env_ids=torch.arange(2, device=device))
+  term.compute(dt=0.0)
+  assert torch.allclose(term.command[:, 0], torch.full((2,), expected, device=device))
+  assert (term.command[:, 1:] == 0.0).all()
+
+
+def test_command_deadzone_applies_to_heading_yaw_rate(device):
+  """A small heading-control yaw rate with no linear command is zeroed."""
+  scene, sim = make_scene_and_sim(
+    device, load_fixture_xml("floating_base_articulated"), sensors=(), num_envs=2
+  )
+  env = _deadzone_env(scene, sim, device)
+  cfg = UniformVelocityCommandCfg(
+    entity_name="robot",
+    resampling_time_range=(1e9, 1e9),
+    heading_command=True,
+    heading_control_stiffness=0.5,
+    rel_heading_envs=1.0,
+    command_deadzone=0.1,
+    ranges=UniformVelocityCommandCfg.Ranges(
+      lin_vel_x=(0.0, 0.0),
+      lin_vel_y=(0.0, 0.0),
+      ang_vel_z=(-0.5, 0.5),
+      heading=(0.1, 0.1),  # Spawn heading is 0: yaw rate 0.05 < 0.1.
+    ),
+  )
+  term = cfg.build(env)
+  sim.forward()
+  term.reset(env_ids=torch.arange(2, device=device))
+  term.compute(dt=0.0)
+  assert (term.command == 0.0).all()
+
+
+def test_y_only_mode_samples_lateral_outside_deadzone(device):
+  """Y-only envs get vx = wz = 0, |vy| above the deadzone and no heading control."""
+  num_envs = 64
+  scene, sim = make_scene_and_sim(
+    device,
+    load_fixture_xml("floating_base_articulated"),
+    sensors=(),
+    num_envs=num_envs,
+  )
+  env = cast(
+    "ManagerBasedRlEnv",
+    SimpleNamespace(
+      scene=scene,
+      sim=sim,
+      num_envs=num_envs,
+      device=device,
+      step_dt=0.02,
+      episode_length_buf=torch.zeros(num_envs, dtype=torch.long, device=device),
+    ),
+  )
+  cfg = UniformVelocityCommandCfg(
+    entity_name="robot",
+    resampling_time_range=(1e9, 1e9),
+    heading_command=True,
+    rel_heading_envs=1.0,
+    rel_lin_y_only_envs=1.0,
+    command_deadzone=0.1,
+    ranges=UniformVelocityCommandCfg.Ranges(
+      lin_vel_x=(-0.35, 0.55),
+      lin_vel_y=(-0.15, 0.15),
+      ang_vel_z=(-0.75, 0.75),
+      heading=(-1.0, 1.0),
+    ),
+  )
+  term = cfg.build(env)
+  sim.forward()
+  term.reset(env_ids=torch.arange(num_envs, device=device))
+  term.compute(dt=0.0)
+  command = term.command
+  assert (command[:, 0] == 0.0).all()
+  assert (command[:, 2] == 0.0).all()
+  assert ((command[:, 1].abs() > 0.1) & (command[:, 1].abs() <= 0.15)).all()
+  assert not term.is_heading_env.any()
+  assert (term.command_mode == term.MODE_Y_ONLY).all()

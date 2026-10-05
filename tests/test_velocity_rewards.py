@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock
 
+import pytest
 import torch
 
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import RayCastData, RayCastSensor
-from mjlab.tasks.velocity.mdp.rewards import upright
+from mjlab.tasks.velocity.mdp.rewards import (
+  feet_gait,
+  feet_separation,
+  stand_still,
+  upright,
+)
 from mjlab.utils.lab_api.math import quat_from_euler_xyz
 
 
@@ -188,3 +195,104 @@ def test_batch_consistency():
   assert r[1].item() > 0.99
   assert r[2].item() < 0.7
   assert r[3].item() > 0.99
+
+
+def _gait_reward(step: int, contact: list[float], command: list[float]) -> float:
+  """Evaluate feet_gait for one env at a given control step."""
+  sensor = MagicMock()
+  sensor.data.current_contact_time = torch.tensor([contact])
+  env = SimpleNamespace(
+    scene={"feet": sensor},
+    episode_length_buf=torch.tensor([step]),
+    step_dt=0.02,
+    device="cpu",
+    command_manager=SimpleNamespace(get_command=lambda _: torch.tensor([command])),
+  )
+  reward = feet_gait(
+    env,  # type: ignore[arg-type]
+    sensor_name="feet",
+    period=0.4,
+    offset=[0.0, 0.5],
+    threshold=0.55,
+    command_name="twist",
+    command_threshold=0.1,
+  )
+  return reward.item()
+
+
+@pytest.mark.parametrize(
+  ("step", "contact", "expected"),
+  [
+    # t = 0.1 s: phases (0.25, 0.75), foot 0 in stance, foot 1 in swing.
+    (5, [0.1, 0.0], 1.0),
+    (5, [0.0, 0.1], 0.0),
+    (5, [0.1, 0.1], 0.5),
+    # t = 0.3 s: phases (0.75, 0.25), the feet swap half a period later.
+    (15, [0.0, 0.1], 1.0),
+    (15, [0.1, 0.0], 0.0),
+  ],
+)
+def test_feet_gait_alternates_half_period(step, contact, expected):
+  assert _gait_reward(step, contact, [0.2, 0.0, 0.0]) == expected
+
+
+@pytest.mark.parametrize("command", [[0.0, 0.0, 0.0], [0.06, 0.0, 0.04]])
+def test_feet_gait_is_zero_when_standing(command):
+  assert _gait_reward(5, [0.1, 0.0], command) == 0.0
+
+
+@pytest.mark.parametrize(
+  ("command", "expected"),
+  [([0.0, 0.0, 0.0], 0.05), ([0.2, 0.0, 0.0], 0.0)],
+)
+def test_stand_still_only_penalizes_at_zero_command(command, expected):
+  asset = MagicMock()
+  asset.data.joint_pos = torch.tensor([[0.1, -0.2, 0.0]])
+  asset.data.default_joint_pos = torch.zeros(1, 3)
+  env = SimpleNamespace(
+    scene={"robot": asset},
+    command_manager=SimpleNamespace(get_command=lambda _: torch.tensor([command])),
+  )
+  cost = stand_still(
+    env,  # type: ignore[arg-type]
+    command_name="twist",
+    command_threshold=0.1,
+    asset_cfg=SceneEntityCfg("robot", joint_ids=slice(None)),
+  )
+  assert cost.item() == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+  ("separation", "yaw", "expected"),
+  [
+    (0.17, 0.0, 0.0),  # At or above the minimum: no cost.
+    (0.30, 0.0, 0.0),  # Wide stance: no upper bound.
+    (0.08, 0.0, 0.75),  # Half the minimum: d = 0.5, d + d^2 = 0.75.
+    (0.08, math.pi / 2, 0.75),  # Measured in the base frame, not world y.
+  ],
+)
+def test_feet_separation_penalizes_close_feet(separation, yaw, expected):
+  c, s = math.cos(yaw), math.sin(yaw)
+  base_pos = torch.tensor([1.0, 2.0, 0.3])
+  # Right and left feet in the base frame, rotated by yaw into the world frame.
+  feet_b = torch.tensor([[0.05, -separation / 2, -0.3], [-0.05, separation / 2, -0.3]])
+  x_w = c * feet_b[:, 0] - s * feet_b[:, 1]
+  y_w = s * feet_b[:, 0] + c * feet_b[:, 1]
+  feet_w = torch.stack([x_w, y_w, feet_b[:, 2]], dim=1)
+  asset = MagicMock()
+  asset.data.site_pos_w = (feet_w + base_pos).unsqueeze(0)
+  asset.data.root_link_pos_w = base_pos.unsqueeze(0)
+  asset.data.root_link_quat_w = torch.tensor(
+    [[math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]]
+  )
+  env = SimpleNamespace(scene={"robot": asset}, extras={"log": {}})
+  cost = feet_separation(
+    env,  # type: ignore[arg-type]
+    min_separation=0.16,
+    asset_cfg=SceneEntityCfg("robot", site_ids=[0, 1]),
+  )
+  assert cost.item() == pytest.approx(expected, abs=1e-6)
+  log = env.extras["log"]
+  assert log["Metrics/foot_separation_mean"].item() == pytest.approx(separation)
+  assert log["Metrics/foot_separation_min"].item() == pytest.approx(separation)
+  assert log["Metrics/foot_too_close_fraction"].item() == float(separation < 0.16)
